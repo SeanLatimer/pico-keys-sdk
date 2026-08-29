@@ -101,13 +101,14 @@ static struct urgb_color urgb_color_table[] = {
 };
 
 static inline uint32_t urgb_u32(uint8_t r, uint8_t g, uint8_t b) {
-    return ((uint32_t) (r) << 8) |  // For GRB data ordering WS2812
-           ((uint32_t) (g) << 16) |
-           (uint32_t) (b);
-#if 0   // TODO: How to adapt WS2812 with different data ordering ?
+#ifdef PICOKEYS_LED_ORDER_RGB
     return ((uint32_t)(r) << 16) |  // For RGB data ordering WS2812
            ((uint32_t)(g) << 8) |
            (uint32_t)(b);
+#else
+    return ((uint32_t) (r) << 8) |  // For GRB data ordering WS2812
+           ((uint32_t) (g) << 16) |
+           (uint32_t) (b);
 #endif
 }
 
