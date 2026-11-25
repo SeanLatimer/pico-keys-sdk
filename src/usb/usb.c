@@ -15,15 +15,20 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include <stdio.h>
-#include "pico_keys.h"
+#include "picokeys.h"
+#include "usb.h"
+#include "led/led.h"
+#include "button.h"
+#include "pico_time.h"
 #if defined(PICO_PLATFORM)
-#include "pico/stdlib.h"
+#include "pico/bootrom.h"
 #include "pico/multicore.h"
 #include "hardware/sync.h"
-#include "bsp/board.h"
+#define CARD_THREAD_STACK_SIZE 16384
+// Keep the card worker off the scratch RAM adjacent to core 0's stack.
+static uint32_t card_thread_stack[CARD_THREAD_STACK_SIZE / sizeof(uint32_t)] __attribute__((aligned(8)));
+#define multicore_launch_func_core1(a) multicore_launch_core1_with_stack((void (*) (void))a, card_thread_stack, sizeof(card_thread_stack))
 #endif
-#include "usb.h"
 #include "apdu.h"
 #ifndef ENABLE_EMULATION
 #include "tusb.h"
@@ -31,20 +36,17 @@
 #include "emulation.h"
 #endif
 
-// For memcpy
-#include <string.h>
-#include <stdlib.h>
-
 // Device specific functions
 static uint32_t *timeout_counter = NULL;
 static uint8_t card_locked_itf = 0; // no locked
 static void *(*card_locked_func)(void *) = NULL;
+uint8_t enabled_usb_itf = PHY_USB_ITF_ALL;
 #ifndef ENABLE_EMULATION
 static mutex_t mutex;
 #endif
 #if !defined(PICO_PLATFORM) && !defined(ENABLE_EMULATION) && !defined(ESP_PLATFORM)
 #ifdef _MSC_VER
-#include "pthread_win32.h"
+#include "compat/pthread_win32.h"
 #endif
 pthread_t hcore0, hcore1;
 #endif
@@ -62,6 +64,12 @@ pthread_t hcore0, hcore1;
     uint8_t ITF_SC_TOTAL = 0;
     extern void ccid_init(void);
 #endif
+
+#ifdef USB_ITF_LWIP
+    uint8_t ITF_LWIP_NET = ITF_INVALID, ITF_LWIP = ITF_INVALID;
+    uint8_t ITF_LWIP_TOTAL = 0;
+    extern void lwip_init(void);
+#endif
 uint8_t ITF_TOTAL = 0;
 
 void usb_set_timeout_counter(uint8_t itf, uint32_t v) {
@@ -73,7 +81,7 @@ queue_t card_to_usb_q = {0};
 
 #ifndef ENABLE_EMULATION
 extern tusb_desc_device_t desc_device;
-extern char *string_desc_itf[4], *string_desc_arr[];
+extern char *string_desc_itf[5], *string_desc_arr[];
 #endif
 void usb_init(void)
 {
@@ -92,7 +100,7 @@ void usb_init(void)
     queue_init(&card_to_usb_q, sizeof(uint32_t), 64);
     queue_init(&usb_to_card_q, sizeof(uint32_t), 64);
 
-    uint8_t enabled_usb_itf = PHY_USB_ITF_CCID | PHY_USB_ITF_WCID | PHY_USB_ITF_HID | PHY_USB_ITF_KB;
+    enabled_usb_itf = PHY_USB_ITF_ALL;
 #ifndef ENABLE_EMULATION
     if (phy_data.enabled_usb_itf_present) {
         enabled_usb_itf = phy_data.enabled_usb_itf;
@@ -105,20 +113,23 @@ void usb_init(void)
 #ifdef USB_ITF_CCID
     ITF_SC_TOTAL = 0;
 #endif
+#ifdef USB_ITF_LWIP
+    ITF_LWIP_TOTAL = 0;
+#endif
     ITF_TOTAL = 0;
 #ifdef USB_ITF_HID
     if (enabled_usb_itf & PHY_USB_ITF_HID) {
         ITF_HID_CTAP = ITF_HID_TOTAL++;
         ITF_HID = ITF_TOTAL++;
 #ifndef ENABLE_EMULATION
-        string_desc_itf[ITF_TOTAL - 1] = string_desc_arr[5];
+        string_desc_itf[ITF_TOTAL - 1] = string_desc_arr[6];
 #endif
     }
     if (enabled_usb_itf & PHY_USB_ITF_KB) {
         ITF_HID_KB = ITF_HID_TOTAL++;
         ITF_KEYBOARD = ITF_TOTAL++;
 #ifndef ENABLE_EMULATION
-        string_desc_itf[ITF_TOTAL - 1] = string_desc_arr[6];
+        string_desc_itf[ITF_TOTAL - 1] = string_desc_arr[7];
 #endif
     }
 #endif
@@ -127,14 +138,23 @@ void usb_init(void)
         ITF_SC_CCID = ITF_SC_TOTAL++;
         ITF_CCID = ITF_TOTAL++;
 #ifndef ENABLE_EMULATION
-        string_desc_itf[ITF_TOTAL - 1] = string_desc_arr[7];
+        string_desc_itf[ITF_TOTAL - 1] = string_desc_arr[8];
 #endif
     }
     if (enabled_usb_itf & PHY_USB_ITF_WCID) {
         ITF_SC_WCID = ITF_SC_TOTAL++;
         ITF_WCID = ITF_TOTAL++;
 #ifndef ENABLE_EMULATION
-        string_desc_itf[ITF_TOTAL - 1] = string_desc_arr[8];
+        string_desc_itf[ITF_TOTAL - 1] = string_desc_arr[9];
+#endif
+    }
+#endif
+#ifdef USB_ITF_LWIP
+    if (enabled_usb_itf & PHY_USB_ITF_LWIP) {
+        ITF_LWIP_NET = ITF_LWIP_TOTAL++;
+        ITF_LWIP = ITF_TOTAL++;
+#ifndef ENABLE_EMULATION
+        string_desc_itf[ITF_TOTAL - 1] = string_desc_arr[10];
 #endif
     }
 #endif
@@ -152,9 +172,17 @@ void usb_init(void)
         ccid_init();
     }
 #endif
+#ifdef USB_ITF_LWIP
+    if (ITF_LWIP_TOTAL > 0) {
+#ifndef ESP_PLATFORM
+        lwip_itf_init();
+#endif
+    }
+#endif
 #ifdef ESP_PLATFORM
     usb_desc_setup();
 #endif
+    set_atr();
 }
 
 #ifdef PICO_PLATFORM
@@ -184,6 +212,7 @@ static void __attribute__((noreturn, noinline)) usb_secure_reboot_now(void) {
     if (stack1_end > stack1_start) {
         secure_bzero((void *) stack1_start, stack1_end - stack1_start);
     }
+    secure_bzero(card_thread_stack, sizeof(card_thread_stack));
 
     uintptr_t new_sp = (((uintptr_t) reboot_temp_stack) + sizeof(reboot_temp_stack)) & ~(uintptr_t)0x7;
 #if defined(__arm__) || defined(__thumb__)
@@ -226,20 +255,23 @@ void usb_send_event(uint32_t flag) {
     if (flag == EV_CMD_AVAILABLE) {
         timeout_start();
     }
-    if (flag != EV_CMD_AVAILABLE) {
-        uint32_t m;
-        queue_remove_blocking(&card_to_usb_q , &m);
-    }
 #ifndef ENABLE_EMULATION
     mutex_exit(&mutex);
 #endif
+
+    if (flag != EV_CMD_AVAILABLE) {
+        uint32_t m;
+        do {
+            queue_remove_blocking(&card_to_usb_q, &m);
+        } while (m != flag + 1);
+    }
 }
 
 void card_init_core1(void) {
     low_flash_init_core1();
 }
 
-uint16_t finished_data_size = 0;
+volatile uint16_t finished_data_size = 0;
 
 void card_start(uint8_t itf, void *(*func)(void *)) {
     timeout_start();
@@ -249,6 +281,9 @@ void card_start(uint8_t itf, void *(*func)(void *)) {
         }
         if (func) {
             multicore_reset_core1();
+#ifdef PICO_PLATFORM
+            secure_bzero(card_thread_stack, sizeof(card_thread_stack));
+#endif
             multicore_launch_func_core1(func);
         }
         led_set_mode(MODE_MOUNTED);
@@ -303,7 +338,7 @@ void usb_task(void) {
 int card_status(uint8_t itf) {
     if (card_locked_itf == itf) {
         if (timeout == 0) {
-            return PICOKEY_ERR_FILE_NOT_FOUND;
+            return PICOKEYS_ERR_FILE_NOT_FOUND;
         }
         uint32_t m = 0x0;
 #ifndef ENABLE_EMULATION
@@ -318,13 +353,14 @@ int card_status(uint8_t itf) {
         if (has_m) {
             if (m == EV_EXEC_FINISHED) {
                 timeout_stop();
-                led_set_mode(MODE_MOUNTED);
-                return PICOKEY_OK;
+                if (led_get_mode() == MODE_PROCESSING) {
+                    led_set_mode(MODE_MOUNTED);
+                }
+                return PICOKEYS_OK;
             }
 #ifndef ENABLE_EMULATION
-            else if (m == EV_PRESS_BUTTON) {
-                uint32_t flag = wait_button() ? EV_BUTTON_TIMEOUT : EV_BUTTON_PRESSED;
-                queue_try_add(&usb_to_card_q, &flag);
+            else if ((m & 0xffu) == EV_PRESS_BUTTON) {
+                button_wait_start_timeout(EV_PRESS_BUTTON_GET_TIMEOUT(m));
             }
 #endif
 #ifdef PICO_PLATFORM
@@ -332,18 +368,18 @@ int card_status(uint8_t itf) {
                 usb_secure_reboot_now();
             }
 #endif
-            return PICOKEY_ERR_FILE_NOT_FOUND;
+            return PICOKEYS_ERR_FILE_NOT_FOUND;
         }
         else {
             if (timeout > 0) {
                 if (timeout + timeout_counter[itf] < board_millis()) {
                     timeout = board_millis();
-                    return PICOKEY_ERR_BLOCKED;
+                    return PICOKEYS_ERR_BLOCKED;
                 }
             }
         }
     }
-    return PICOKEY_ERR_FILE_NOT_FOUND;
+    return PICOKEYS_ERR_FILE_NOT_FOUND;
 }
 
 #ifndef USB_ITF_CCID

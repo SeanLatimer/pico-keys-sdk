@@ -15,7 +15,8 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include "pico_keys.h"
+#include "picokeys.h"
+#include "led/led.h"
 
 #ifdef PICO_PLATFORM
 #include "hardware/pio.h"
@@ -100,16 +101,27 @@ static struct urgb_color urgb_color_table[] = {
     {0xff, 0xff, 0xff}  // 7: white     LED_COLOR_WHITE
 };
 
+static inline uint32_t urgb_ordered_u32(uint8_t first, uint8_t second, uint8_t third) {
+    return ((uint32_t)first << 16) | ((uint32_t)second << 8) | third;
+}
+
 static inline uint32_t urgb_u32(uint8_t r, uint8_t g, uint8_t b) {
-#ifdef PICOKEYS_LED_ORDER_RGB
-    return ((uint32_t)(r) << 16) |  // For RGB data ordering WS2812
-           ((uint32_t)(g) << 8) |
-           (uint32_t)(b);
-#else
-    return ((uint32_t) (r) << 8) |  // For GRB data ordering WS2812
-           ((uint32_t) (g) << 16) |
-           (uint32_t) (b);
-#endif
+    uint8_t order = phy_data.led_order_present ? phy_data.led_order : PHY_LED_ORDER_GRB;
+    switch (order) {
+        case PHY_LED_ORDER_RBG:
+            return urgb_ordered_u32(r, b, g);
+        case PHY_LED_ORDER_GRB:
+            return urgb_ordered_u32(g, r, b);
+        case PHY_LED_ORDER_GBR:
+            return urgb_ordered_u32(g, b, r);
+        case PHY_LED_ORDER_BRG:
+            return urgb_ordered_u32(b, r, g);
+        case PHY_LED_ORDER_BGR:
+            return urgb_ordered_u32(b, g, r);
+        case PHY_LED_ORDER_RGB:
+        default:
+            return urgb_ordered_u32(r, g, b);
+    }
 }
 
 static inline void ws2812_put_pixel(uint32_t u32_pixel) {

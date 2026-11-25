@@ -15,29 +15,24 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include <stdint.h>
-#include <string.h>
-#include <stdio.h>
+#include "picokeys.h"
 #include "hwrng.h"
+#include "pico_time.h"
 
 #if defined(PICO_PLATFORM)
-#include "pico/stdlib.h"
-#include "bsp/board.h"
 #include "pico/rand.h"
+#include "pico/mutex.h"
 #elif defined(ESP_PLATFORM)
 #include "bootloader_random.h"
 #include "esp_random.h"
-#include "esp_compat.h"
+#include "compat/esp_compat.h"
 #else
-#include <stdbool.h>
-#include <stdlib.h>
-#include <time.h>
-#include "board.h"
+#include "compat/queue.h"
 #endif
 
 static void hwrng_start(void) {
 #if defined(ENABLE_EMULATION)
-    srand(time(0));
+    srand((unsigned int)time(NULL));
 #elif defined(ESP_PLATFORM)
     bootloader_random_enable();
 #endif
@@ -76,45 +71,93 @@ static int hwrng_mix_process(void) {
     return 0;
 }
 
-struct hwrng_buf {
-    uint32_t *buf;
-    uint8_t head, tail;
-    uint8_t size;
-    unsigned int full : 1;
-    unsigned int empty : 1;
-};
+typedef struct hwrng_buf {
+    uint8_t *buf;
+    size_t head;
+    size_t tail;
+    size_t size;
+    size_t count;
+} hwrng_buf_t;
 
-static void hwrng_buf_init(struct hwrng_buf *rb, uint32_t *p, uint8_t size) {
-    rb->buf = p;
-    rb->size = size;
+static mutex_t hwrng_mutex;
+static bool hwrng_mutex_initialized = false;
+
+static inline void hwrng_lock(void) {
+    if (hwrng_mutex_initialized) {
+        mutex_enter_blocking(&hwrng_mutex);
+    }
+}
+
+static inline void hwrng_unlock(void) {
+    if (hwrng_mutex_initialized) {
+        mutex_exit(&hwrng_mutex);
+    }
+}
+
+static void hwrng_buf_init(struct hwrng_buf *rb, byte_array_t buffer) {
+    rb->buf = buffer.data;
+    rb->size = buffer.len;
     rb->head = rb->tail = 0;
-    rb->full = 0;
-    rb->empty = 1;
+    rb->count = 0;
 }
 
-static void hwrng_buf_add(struct hwrng_buf *rb, uint32_t v) {
-    rb->buf[rb->tail++] = v;
-    if (rb->tail == rb->size) {
-        rb->tail = 0;
+static size_t hwrng_buf_add(struct hwrng_buf *rb, const_byte_array_t data) {
+    size_t room = rb->size - rb->count;
+    size_t n = data.len < room ? data.len : room;
+    size_t tail = rb->tail;
+    size_t first = n;
+
+    if (first > rb->size - tail) {
+        first = rb->size - tail;
     }
-    if (rb->tail == rb->head) {
-        rb->full = 1;
+    if (first) {
+        memcpy(rb->buf + tail, data.data, first);
+        tail += first;
+        if (tail >= rb->size) {
+            tail = 0;
+        }
     }
-    rb->empty = 0;
+    if (n > first) {
+        size_t second = n - first;
+        memcpy(rb->buf + tail, data.data + first, second);
+        tail += second;
+    }
+    rb->tail = tail;
+    rb->count += n;
+    return n;
 }
 
-static uint32_t hwrng_buf_del(struct hwrng_buf *rb) {
-    uint32_t v = rb->buf[rb->head++];
+static size_t hwrng_buf_del(struct hwrng_buf *rb, byte_array_t data) {
+    size_t n = data.len < rb->count ? data.len : rb->count;
+    size_t head = rb->head;
+    size_t first = n;
 
-    if (rb->head == rb->size) {
-        rb->head = 0;
+    if (first > rb->size - head) {
+        first = rb->size - head;
     }
-    if (rb->head == rb->tail) {
-        rb->empty = 1;
+    if (first) {
+        memcpy(data.data, rb->buf + head, first);
+        head += first;
+        if (head >= rb->size) {
+            head = 0;
+        }
     }
-    rb->full = 0;
+    if (n > first) {
+        size_t second = n - first;
+        memcpy(data.data + first, rb->buf + head, second);
+        head += second;
+    }
+    rb->head = head;
+    rb->count -= n;
+    return n;
+}
 
-    return v;
+static inline size_t hwrng_buf_space(const struct hwrng_buf *rb) {
+    return rb->size - rb->count;
+}
+
+static inline bool hwrng_buf_full(const struct hwrng_buf *rb) {
+    return rb->count == rb->size;
 }
 
 static struct hwrng_buf ring_buffer;
@@ -122,46 +165,57 @@ static struct hwrng_buf ring_buffer;
 void *hwrng_task(void) {
     struct hwrng_buf *rb = &ring_buffer;
 
-    int n;
-
-    if ((n = hwrng_mix_process())) {
-        const uint32_t *vp = (const uint32_t *) &random_word;
-
-        for (int i = 0; i < n; i++) {
-            hwrng_buf_add(rb, *vp++);
-            if (rb->full) {
-                break;
-            }
-        }
+    hwrng_lock();
+    if (hwrng_buf_space(rb) >= sizeof(random_word) && hwrng_mix_process()) {
+        hwrng_buf_add(rb, CONST_BYTE_ARRAY((const uint8_t *)&random_word, sizeof(random_word)));
     }
+    hwrng_unlock();
     return NULL;
 }
 
-void hwrng_init(uint32_t *buf, uint8_t size) {
+void hwrng_init(byte_array_t buffer) {
     struct hwrng_buf *rb = &ring_buffer;
 
-    hwrng_buf_init(rb, buf, size);
+    mutex_init(&hwrng_mutex);
+    hwrng_mutex_initialized = true;
+    hwrng_buf_init(rb, buffer);
 
     hwrng_start();
 
     hwrng_mix_init();
 }
 
+size_t hwrng_read(byte_array_t buffer) {
+    struct hwrng_buf *rb = &ring_buffer;
+    size_t n;
+
+    hwrng_lock();
+    n = hwrng_buf_del(rb, buffer);
+    hwrng_unlock();
+    return n;
+}
+
 void hwrng_flush(void) {
     struct hwrng_buf *rb = &ring_buffer;
-    while (!rb->empty) {
-        hwrng_buf_del(rb);
-    }
+    hwrng_lock();
+    rb->head = 0;
+    rb->tail = 0;
+    rb->count = 0;
+    hwrng_unlock();
 }
 
 uint32_t hwrng_get(void) {
-    struct hwrng_buf *rb = &ring_buffer;
-    uint32_t v;
+    uint32_t v = 0;
+    size_t offset = 0;
 
-    while (rb->empty) {
-        hwrng_task();
+    while (offset < sizeof(v)) {
+        size_t n = hwrng_read(BYTE_ARRAY(((uint8_t *)&v) + offset, sizeof(v) - offset));
+        if (n == 0) {
+            hwrng_task();
+            continue;
+        }
+        offset += n;
     }
-    v = hwrng_buf_del(rb);
 
     return v;
 }
@@ -173,7 +227,13 @@ void hwrng_wait_full(void) {
 #elif defined(PICO_PLATFORM)
     uint core = get_core_num();
 #endif
-    while (!rb->full) {
+    while (true) {
+        hwrng_lock();
+        bool full = hwrng_buf_full(rb);
+        hwrng_unlock();
+        if (full) {
+            break;
+        }
 #if defined(PICO_PLATFORM) || defined(ESP_PLATFORM)
         if (core == 1) {
             sleep_ms(1);
