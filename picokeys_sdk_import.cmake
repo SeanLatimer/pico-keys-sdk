@@ -734,20 +734,33 @@ if(PICO_RP2350)
     endif()
     target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE pico_bootrom)
 
-    list(APPEND INCLUDES
-        ${CMAKE_CURRENT_LIST_DIR}/config/rp2350/alt
+    # SHA-256 through the RP2350 hardware block (config/rp2350/alt). OFF
+    # builds mbedtls' software SHA-256 instead, for comparing the two on
+    # hardware. See doc/review/sha256.md in pico-hsm for the known limits of
+    # the hardware path (one hash in flight, clone shares the hardware).
+    option(PICOKEYS_RP2350_HW_SHA256 "Use the RP2350 SHA-256 hardware for mbedtls SHA-256 (OFF = software)" ON)
+    configure_bool_option(
+        PICOKEYS_RP2350_HW_SHA256
+        ""
+        "RP2350 SHA-256:		 hardware"
+        "RP2350 SHA-256:		 software"
     )
-    if(TARGET mbedtls)
-        target_include_directories(mbedtls PRIVATE
+    if(PICOKEYS_RP2350_HW_SHA256)
+        list(APPEND INCLUDES
             ${CMAKE_CURRENT_LIST_DIR}/config/rp2350/alt
         )
-        target_link_libraries(mbedtls PRIVATE pico_sha256)
+        if(TARGET mbedtls)
+            target_include_directories(mbedtls PRIVATE
+                ${CMAKE_CURRENT_LIST_DIR}/config/rp2350/alt
+            )
+            target_link_libraries(mbedtls PRIVATE pico_sha256)
+        endif()
+        list(APPEND PICOKEYS_SOURCES
+            ${CMAKE_CURRENT_LIST_DIR}/config/rp2350/alt/sha256_alt.c
+        )
+        add_compile_definitions(MBEDTLS_SHA256_ALT=1)
+        list(APPEND LIBRARIES pico_sha256)
     endif()
-    list(APPEND PICOKEYS_SOURCES
-        ${CMAKE_CURRENT_LIST_DIR}/config/rp2350/alt/sha256_alt.c
-    )
-    add_compile_definitions(MBEDTLS_SHA256_ALT=1)
-    list(APPEND LIBRARIES pico_sha256)
 endif()
 set(INTERNAL_SOURCES ${PICOKEYS_SOURCES})
 
