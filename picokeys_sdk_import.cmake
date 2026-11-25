@@ -715,7 +715,18 @@ endif()
 
 if(PICO_RP2350)
     pico_set_uf2_family(${CMAKE_PROJECT_NAME} "rp2350-arm-s")
-    pico_embed_pt_in_binary(${CMAKE_PROJECT_NAME} "${CMAKE_CURRENT_LIST_DIR}/config/rp2350/pt.json")
+    # The data partition bounds the filesystem (clamped to the detected
+    # chip size). The default ends at 4 MB; a board with more flash can
+    # supply its own table. The filesystem is anchored at the partition's
+    # end, so changing the table on a provisioned device orphans its data.
+    if(NOT PICOKEYS_PARTITION_TABLE)
+        set(PICOKEYS_PARTITION_TABLE "${CMAKE_CURRENT_LIST_DIR}/config/rp2350/pt.json")
+    endif()
+    if(NOT EXISTS "${PICOKEYS_PARTITION_TABLE}")
+        message(FATAL_ERROR "PICOKEYS_PARTITION_TABLE not found: ${PICOKEYS_PARTITION_TABLE}")
+    endif()
+    message(STATUS "Partition table:\t\t ${PICOKEYS_PARTITION_TABLE}")
+    pico_embed_pt_in_binary(${CMAKE_PROJECT_NAME} "${PICOKEYS_PARTITION_TABLE}")
     if(SECURE_BOOT_PKEY)
         message(STATUS "Secure Boot Key ${SECURE_BOOT_PKEY}")
         pico_sign_binary(${CMAKE_PROJECT_NAME} ${SECURE_BOOT_PKEY})
