@@ -112,6 +112,7 @@ if(ESP_PLATFORM AND COMMAND idf_build_set_property)
 endif()
 include(${CMAKE_CURRENT_LIST_DIR}/cmake/openssl.cmake)
 include(${CMAKE_CURRENT_LIST_DIR}/cmake/build_helpers.cmake)
+include(${CMAKE_CURRENT_LIST_DIR}/cmake/reproducible.cmake)
 
 option(ENABLE_DELAYED_BOOT "Enable/disable delayed boot" OFF)
 configure_bool_option(
