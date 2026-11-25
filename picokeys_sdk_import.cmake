@@ -160,6 +160,17 @@ endif()
 message(STATUS "USB VID/PID:\t\t\t ${USB_VID}:${USB_PID}")
 include(${CMAKE_CURRENT_LIST_DIR}/cmake/deps.cmake)
 
+# Timing probes and the benchmark APDU (src/bench). Development builds only:
+# a probe reports how long an operation took, which is a timing side channel.
+option(PICOKEYS_BENCHMARK "Build the benchmark probes and APDU (never for production)" OFF)
+if(PICOKEYS_BENCHMARK)
+    if(SECURE_BOOT_PKEY)
+        message(FATAL_ERROR "PICOKEYS_BENCHMARK cannot be combined with a signed (SECURE_BOOT_PKEY) image")
+    endif()
+    add_compile_definitions(PICOKEYS_BENCHMARK=1)
+    message(WARNING "PICOKEYS_BENCHMARK is ON: this image is for measurement, not for production")
+endif()
+
 option(ENABLE_PQC "Enable/disable PQC support" OFF)
 configure_bool_option(
     ENABLE_PQC
@@ -360,6 +371,7 @@ endif()
 
 list(APPEND PICOKEYS_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/src/main.c
+    ${CMAKE_CURRENT_LIST_DIR}/src/bench/bench.c
     ${CMAKE_CURRENT_LIST_DIR}/src/usb/usb.c
     ${CMAKE_CURRENT_LIST_DIR}/src/fs/file.c
     ${CMAKE_CURRENT_LIST_DIR}/src/fs/vault_container.c

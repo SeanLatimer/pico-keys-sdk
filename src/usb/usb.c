@@ -30,6 +30,7 @@ static uint32_t card_thread_stack[CARD_THREAD_STACK_SIZE / sizeof(uint32_t)] __a
 #define multicore_launch_func_core1(a) multicore_launch_core1_with_stack((void (*) (void))a, card_thread_stack, sizeof(card_thread_stack))
 #endif
 #include "apdu.h"
+#include "bench/bench.h"
 #ifndef ENABLE_EMULATION
 #include "tusb.h"
 #else
@@ -197,6 +198,19 @@ static inline void secure_bzero(void *ptr, size_t len) {
         *p++ = 0xFF;
     }
 }
+
+#ifdef PICOKEYS_BENCHMARK
+/* Bytes of the core1 (card thread) stack used since core1 was last
+ * launched. card_start() fills the stack with 0xFF before each launch. */
+size_t usb_card_stack_used(size_t *total) {
+    *total = sizeof(card_thread_stack);
+    size_t i = 0;
+    while (i < count_of(card_thread_stack) && card_thread_stack[i] == 0xFFFFFFFFu) {
+        i++;
+    }
+    return sizeof(card_thread_stack) - i * sizeof(card_thread_stack[0]);
+}
+#endif
 
 static void __attribute__((noreturn, noinline)) usb_secure_reboot_now(void) {
     uintptr_t heap_start = (uintptr_t) &__end__;

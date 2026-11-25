@@ -20,6 +20,7 @@
 #include "picokeys.h"
 #include "hwrng.h"
 #include "random.h"
+#include "bench/bench.h"
 
 #define RANDOM_BYTES_LENGTH 32
 static uint8_t random_pool[256];
@@ -53,6 +54,8 @@ const uint8_t *random_bytes_get(size_t len) {
 int random_fill_iterator(void *arg, unsigned char *out, size_t out_len) {
     random_fill_iterator_ctx_t *ctx = (random_fill_iterator_ctx_t *) arg;
     int ret = 0;
+    bench_t bench = bench_begin();
+    uint32_t bench_len = bench_pow2_bucket(out_len);
 
     while (out_len) {
         if (ctx && ctx->cancel) {
@@ -71,6 +74,7 @@ int random_fill_iterator(void *arg, unsigned char *out, size_t out_len) {
         }
     }
 
+    bench_end(BENCH_RNG_FILL, bench_len, bench);
     return ret;
 }
 
