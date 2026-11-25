@@ -184,11 +184,6 @@ int phy_unserialize_data(const_byte_array_t data, phy_data_t *phy) {
 
 int phy_init(void) {
     memset(&phy_data, 0, sizeof(phy_data_t));
-#ifdef PICOKEYS_DEFAULT_LED_BRIGHTNESS
-    /* Build-time default; a value stored in EF_PHY still overrides it via phy_load(). */
-    phy_data.led_brightness = PICOKEYS_DEFAULT_LED_BRIGHTNESS;
-    phy_data.led_brightness_present = true;
-#endif
     return phy_load();
 }
 

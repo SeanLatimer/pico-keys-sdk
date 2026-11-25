@@ -47,6 +47,11 @@ enum {
 #define MAX_BTNESS          ((1 << LED_BTNESS_BITS) - 1)
 #define HALF_BTNESS         ((1 << (LED_BTNESS_BITS - 1)) - 1)
 
+/* Build-time fallback, used only while EF_PHY carries no brightness. */
+#ifndef PICOKEYS_DEFAULT_LED_BRIGHTNESS
+#define PICOKEYS_DEFAULT_LED_BRIGHTNESS MAX_BTNESS
+#endif
+
 // steady on
 #define LED_ON_NO_BLINK     ((1000 << LED_ON_SHIFT) | (0 << LED_OFF_SHIFT))
 

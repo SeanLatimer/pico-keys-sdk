@@ -75,6 +75,11 @@
 #define PHY_LED_ORDER_BRG 0x4
 #define PHY_LED_ORDER_BGR 0x5
 
+/* Build-time fallback, used only while EF_PHY carries no LED order. */
+#ifndef PICOKEYS_DEFAULT_LED_ORDER
+#define PICOKEYS_DEFAULT_LED_ORDER PHY_LED_ORDER_GRB
+#endif
+
 #include <stdint.h>
 #include <stdbool.h>
 

@@ -191,7 +191,16 @@ uint32_t button_timeout_seconds(void) {
        it will not be possible to indicate button press unless it
        is commissioned. */
 #ifndef ENABLE_EMULATION
-    return phy_data.up_btn_present ? phy_data.up_btn : 0;
+    uint32_t seconds = phy_data.up_btn_present ? phy_data.up_btn : 0;
+#ifdef PICOKEYS_DEFAULT_UP_BTN
+    /* Build-time floor. EF_PHY is writable from the host, so a stored value
+       below the firmware's own (including 0, which skips the wait) must not
+       be able to shorten or switch off a presence check. */
+    if (seconds < PICOKEYS_DEFAULT_UP_BTN) {
+        seconds = PICOKEYS_DEFAULT_UP_BTN;
+    }
+#endif
+    return seconds;
 #else
     return 0;
 #endif

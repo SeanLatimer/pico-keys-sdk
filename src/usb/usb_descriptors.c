@@ -24,6 +24,11 @@
 #include "usb.h"
 #include "serial.h"
 
+/* Overridable so a fork can identify its builds without patching this file. */
+#ifndef PICOKEYS_USB_MANUFACTURER
+#define PICOKEYS_USB_MANUFACTURER "Pol Henarejos"
+#endif
+
 #ifndef USB_VID
 #define USB_VID   0x2E8A
 #endif
@@ -347,7 +352,7 @@ uint8_t const *tud_descriptor_bos_cb(void) {
 char *string_desc_itf[5] = {0};
 char const *string_desc_arr [] = {
     (const char[]) { 0x09, 0x04 }, // 0: is supported language is English (0x0409)
-    "schmidtw/pico-hsm",                 // 1: Manufacturer
+    PICOKEYS_USB_MANUFACTURER,           // 1: Manufacturer
     "Pico Key",                       // 2: Product
     "11223344",                      // 3: Serials, should use chip ID
     "MAC"                   // 4: MAC address string, handled separately

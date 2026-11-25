@@ -106,7 +106,7 @@ static inline uint32_t urgb_ordered_u32(uint8_t first, uint8_t second, uint8_t t
 }
 
 static inline uint32_t urgb_u32(uint8_t r, uint8_t g, uint8_t b) {
-    uint8_t order = phy_data.led_order_present ? phy_data.led_order : PHY_LED_ORDER_GRB;
+    uint8_t order = phy_data.led_order_present ? phy_data.led_order : PICOKEYS_DEFAULT_LED_ORDER;
     switch (order) {
         case PHY_LED_ORDER_RBG:
             return urgb_ordered_u32(r, b, g);
@@ -132,7 +132,7 @@ static void led_driver_color_ws2812(uint8_t color, uint32_t led_brightness, floa
     if (!(phy_data.opts & PHY_OPT_DIMM)) {
         progress = progress >= 0.5 ? 1 : 0;
     }
-    uint32_t led_phy_btness = phy_data.led_brightness_present ? phy_data.led_brightness : MAX_BTNESS;
+    uint32_t led_phy_btness = phy_data.led_brightness_present ? phy_data.led_brightness : PICOKEYS_DEFAULT_LED_BRIGHTNESS;
 
     float brightness = ((float)led_brightness / MAX_BTNESS) * ((float)led_phy_btness / MAX_BTNESS) * progress;
     struct urgb_color pixel_color = urgb_color_table[color];
