@@ -147,6 +147,11 @@ static void otp_migrate_chaff(void) {
     otp_lock_page(OTP_MKEK_ROW >> 6);
 }
 
+/* RP2350 has four boot-key slots, BOOTKEY0..3 (rows 0x80-0xBF); KEY_VALID
+   and KEY_INVALID in BOOT_FLAGS1 are 4-bit fields. Higher indices land on
+   unrelated OTP rows. */
+#define OTP_BOOTKEY_SLOTS 4
+
 bool otp_platform_is_secure_boot_enabled(uint8_t *bootkey) {
     const uint8_t *crit1 = otp_buffer(OTP_DATA_CRIT1_ROW);
     if ((crit1[0] & (1 << OTP_DATA_CRIT1_SECURE_BOOT_ENABLE_LSB)) == 0) {
@@ -159,13 +164,13 @@ bool otp_platform_is_secure_boot_enabled(uint8_t *bootkey) {
         0x51, 0x11, 0x0B, 0xAF, 0xAC, 0x9B, 0xC8, 0x71
     };
     uint8_t bootkey_idx = 0;
-    for (; bootkey_idx < 6; bootkey_idx++) {
+    for (; bootkey_idx < OTP_BOOTKEY_SLOTS; bootkey_idx++) {
         const uint8_t *bootkey_row = otp_buffer(OTP_DATA_BOOTKEY0_0_ROW + 0x10 * bootkey_idx);
         if (memcmp(bootkey_row, BOOTKEY, sizeof(BOOTKEY)) == 0) {
             break;
         }
     }
-    if (bootkey_idx == 6) {
+    if (bootkey_idx == OTP_BOOTKEY_SLOTS) {
         return false;
     }
     const uint8_t *boot_flags1 = otp_buffer(OTP_DATA_BOOT_FLAGS1_ROW);
@@ -200,7 +205,7 @@ bool otp_platform_is_secure_boot_locked(void) {
 int otp_platform_enable_secure_boot(uint8_t bootkey, bool secure_lock) {
     int ret = 0;
 
-    if (bootkey >= 6) {
+    if (bootkey >= OTP_BOOTKEY_SLOTS) {
         return PICOKEYS_WRONG_DATA;
     }
 

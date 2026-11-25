@@ -503,7 +503,12 @@ static int cmd_read(void) {
     return SW_OK();
 }
 
-#if defined(PICO_RP2350) || defined(ESP_PLATFORM)
+/* INS_SECURE burns the upstream vendor's boot-key hash into OTP and enables
+   secure boot (optionally with lock). It is irreversible and cannot install
+   any other key, so a build that signs its own images can compile it out
+   with PICOKEYS_DISABLE_VENDOR_SECURE_BOOT; secure boot with an
+   independently held key is provisioned with picotool instead. */
+#if (defined(PICO_RP2350) || defined(ESP_PLATFORM)) && !defined(PICOKEYS_DISABLE_VENDOR_SECURE_BOOT)
 static int cmd_secure(void) {
     if (apdu.nc != 0) {
         return SW_WRONG_LENGTH();
@@ -563,7 +568,7 @@ static int cmd_reboot_bootsel(void) {
 static const cmd_t cmds[] = {
     { INS_KEYDEV_SIGN, cmd_keydev_sign },
     { INS_WRITE, cmd_write },
-#if defined(PICO_RP2350) || defined(ESP_PLATFORM)
+#if (defined(PICO_RP2350) || defined(ESP_PLATFORM)) && !defined(PICOKEYS_DISABLE_VENDOR_SECURE_BOOT)
     { INS_SECURE, cmd_secure },
 #endif
     { INS_READ, cmd_read },
