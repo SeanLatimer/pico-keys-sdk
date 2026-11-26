@@ -24,6 +24,12 @@
 #include "compat/compat.h"
 #include "phy.h"
 
+/* ESP32 keeps the original in-place file system; the other platforms store files
+   in NVS (file_store.c). */
+#if defined(ESP_PLATFORM) && !defined(PICOKEYS_LEGACY_FS)
+#define PICOKEYS_LEGACY_FS 1
+#endif
+
 #define FILE_TYPE_NOT_KNOWN     0x00
 #define FILE_TYPE_DF            0x04
 #define FILE_TYPE_INTERNAL_EF   0x02
@@ -63,6 +69,13 @@
 #define SPECIFY_ANY 0x3
 
 #define EF_META     0xE010
+
+/* File IDs the store keeps for itself: parts of large files, and from
+   FILE_STORE_RESERVED_FID up. */
+#define FILE_STORE_CHUNK_FIRST  0xF800u
+#define FILE_STORE_CHUNK_LAST   0xFBFFu
+#define FILE_STORE_RESERVED_FID 0xFFFCu
+#define FILE_STORE_FID_RESERVED(fid) (((fid) >= FILE_STORE_CHUNK_FIRST && (fid) <= FILE_STORE_CHUNK_LAST) || (fid) >= FILE_STORE_RESERVED_FID)
 
 #ifdef _MSC_VER
 __pragma( pack(push, 1) )
@@ -133,6 +146,7 @@ extern bool file_authenticate_action(const file_t *ef, uint8_t op);
 extern void file_process_fci(const file_t *pe, int fmd);
 extern void file_scan_flash(void);
 extern void file_initialize_flash(bool);
+extern void file_index_reset(void);
 
 extern file_entry_t file_entries[];
 

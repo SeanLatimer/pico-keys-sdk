@@ -82,6 +82,7 @@ void flash_reserve_bottom(uint32_t bytes) {
     start_data_pool = data_area_start + bytes;
 }
 
+#ifdef PICOKEYS_LEGACY_FS
 static size_t flash_record_length_size(uintptr_t base) {
     uintptr_t length_addr = base + 2 * sizeof(uintptr_t) + sizeof(uint16_t);
     return flash_read_uint16(length_addr) == FLASH_FILE_EXTENDED_LENGTH ? FLASH_FILE_EXTENDED_LENGTH_SIZE : FLASH_FILE_LEGACY_LENGTH_SIZE;
@@ -302,6 +303,8 @@ uint32_t flash_num_files(void) {
     return num_files;
 }
 
+#endif
+
 uint32_t flash_size(void) {
     return FLASH_SIZE_BYTES;
 }
@@ -310,6 +313,7 @@ void flash_task(void) {
     low_flash_task();
 }
 
+#ifdef PICOKEYS_LEGACY_FS
 void flash_commit(void) {
     low_flash_commit();
 }
@@ -317,3 +321,4 @@ void flash_commit(void) {
 bool flash_commit_sync(uint32_t timeout_ms) {
     return low_flash_commit_sync(timeout_ms);
 }
+#endif

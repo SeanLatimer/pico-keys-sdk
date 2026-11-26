@@ -310,6 +310,22 @@ bool file_authenticate_action(const file_t *ef, uint8_t op) {
     return false;
 }
 
+/* Forget where every file's data is: static flash files lose their pointer and
+   the dynamic index is emptied. The store fills it again. */
+void file_index_reset(void) {
+    for (file_entry_t *f = file_entries; f != file_last; f++) {
+        if ((f->type & FILE_DATA_FLASH) == FILE_DATA_FLASH) {
+            f->data = NULL;
+        }
+    }
+#ifndef ENABLE_EMULATION
+    ef_phy->data = NULL;
+#endif
+    memset(dynamic_file, 0, sizeof(dynamic_file));
+    dynamic_files = 0;
+}
+
+#ifdef PICOKEYS_LEGACY_FS
 void file_initialize_flash(bool hard) {
     if (hard) {
         const uint8_t empty[8] = { 0 };
@@ -466,6 +482,8 @@ int file_read_at(const file_t *tf, uint32_t offset, byte_array_t data) {
     return flash_read_block((uintptr_t)tf->data + length_size + offset, data);
 }
 
+#endif
+
 int file_put_data(file_t *file, const_byte_array_t data) {
     return flash_write_data_to_file(file, data);
 }
@@ -496,7 +514,7 @@ file_t *file_new(uint16_t fid) {
     if ((f = file_search(fid))) {
         return f;
     }
-    if (fid == DYNAMIC_FID_EMPTY || fid == DYNAMIC_FID_DELETED || dynamic_files >= MAX_DYNAMIC_FILES) {
+    if (fid == DYNAMIC_FID_EMPTY || FILE_STORE_FID_RESERVED(fid) || dynamic_files >= MAX_DYNAMIC_FILES) {
         return NULL;
     }
     f = find_dynamic_slot(fid);
@@ -714,6 +732,7 @@ int file_delete(file_t *ef) {
     return PICOKEYS_OK;
 }
 
+#ifdef PICOKEYS_LEGACY_FS
 int flash_clear_file(file_t *file) {
     if (file == NULL || file->data == NULL) {
         return PICOKEYS_OK;
@@ -749,3 +768,4 @@ int flash_clear_file(file_t *file) {
     //printf("na %lx->%lx\n",prev_addr,flash_read_uintptr(prev_addr));
     return PICOKEYS_OK;
 }
+#endif

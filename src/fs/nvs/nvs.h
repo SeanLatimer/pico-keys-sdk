@@ -75,4 +75,13 @@ int nvs_batch_write(struct nvs_fs *fs, const struct nvs_batch_entry *entries, si
  * Values are contiguous; the offset is valid until the next write. -ENOENT if absent. */
 int nvs_locate(struct nvs_fs *fs, uint16_t id, uint32_t *offset, size_t *len);
 
+/* Calls cb once for every stored id (not deleted ones), with the offset and length
+ * of its current value. A non-zero return from cb stops the walk and is returned.
+ * Not reentrant: uses an 8 KB static bitmap. */
+typedef int (*nvs_foreach_cb)(void *ctx, uint16_t id, uint32_t offset, size_t len);
+int nvs_foreach(struct nvs_fs *fs, nvs_foreach_cb cb, void *ctx);
+
+/* Largest value one entry can hold. */
+#define NVS_MAX_VALUE(sector_size) ((sector_size) - 4 * 8 - 4)
+
 #endif

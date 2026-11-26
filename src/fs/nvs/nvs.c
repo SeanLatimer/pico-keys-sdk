@@ -980,7 +980,7 @@ static int nvs_find(struct nvs_fs *fs, uint16_t id, uint32_t *ate_addr, struct n
  * negative on error. */
 static int nvs_unchanged(struct nvs_fs *fs, uint16_t id, const void *data, size_t len) {
     struct nvs_ate ate;
-    uint32_t ate_addr;
+    uint32_t ate_addr = 0;
     int rc = nvs_find(fs, id, &ate_addr, &ate);
 
     if (rc < 0) {
@@ -1238,7 +1238,7 @@ ssize_t nvs_read(struct nvs_fs *fs, uint16_t id, void *data, size_t len) {
 
 int nvs_locate(struct nvs_fs *fs, uint16_t id, uint32_t *offset, size_t *len) {
     struct nvs_ate ate;
-    uint32_t ate_addr;
+    uint32_t ate_addr = 0;
     int rc;
 
     if (!fs->ready) {
@@ -1253,6 +1253,41 @@ int nvs_locate(struct nvs_fs *fs, uint16_t id, uint32_t *offset, size_t *len) {
     }
     *offset = nvs_flash_offset(fs, (ate_addr & ADDR_SECT_MASK) + ate.offset);
     *len = ate.len - NVS_DATA_CRC_SIZE;
+    return 0;
+}
+
+int nvs_foreach(struct nvs_fs *fs, nvs_foreach_cb cb, void *ctx) {
+    uint32_t addr, ate_addr;
+    struct nvs_ate ate;
+    int rc;
+    /* one bit per id: the walk goes newest first, so the first sighting of an id
+     * is its current value, or its delete */
+    static uint8_t seen[8192];
+
+    if (!fs->ready) {
+        return -EACCES;
+    }
+    memset(seen, 0, sizeof(seen));
+    addr = fs->ate_wra;
+    while (true) {
+        ate_addr = addr;
+        rc = nvs_prev_ate(fs, &addr, &ate);
+        if (rc) {
+            return rc;
+        }
+        if (ate.id < NVS_ID_RESERVED && nvs_ate_valid(fs, ate_addr, &ate) && !(seen[ate.id >> 3] & (1u << (ate.id & 7)))) {
+            seen[ate.id >> 3] |= (uint8_t)(1u << (ate.id & 7));
+            if (ate.len >= NVS_DATA_CRC_SIZE) {
+                rc = cb(ctx, ate.id, nvs_flash_offset(fs, (ate_addr & ADDR_SECT_MASK) + ate.offset), ate.len - NVS_DATA_CRC_SIZE);
+                if (rc) {
+                    return rc;
+                }
+            }
+        }
+        if (addr == fs->ate_wra) {
+            break;
+        }
+    }
     return 0;
 }
 

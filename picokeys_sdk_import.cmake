@@ -336,6 +336,12 @@ if(ENABLE_PQC)
     )
 endif()
 
+# Size of the file store's data area in 16 KB sectors (default 64, 1 MB).
+# Tests set it small so garbage collection runs often.
+if(PICOKEYS_FILE_STORE_DATA_SECTORS)
+    add_compile_definitions(FILE_STORE_DATA_SECTORS=${PICOKEYS_FILE_STORE_DATA_SECTORS}u)
+endif()
+
 if(ESP_PLATFORM)
     list(APPEND PICOKEYS_SOURCES
         ${CMAKE_CURRENT_LIST_DIR}/src/otp/otp_esp32.c
@@ -374,6 +380,8 @@ list(APPEND PICOKEYS_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/src/bench/bench.c
     ${CMAKE_CURRENT_LIST_DIR}/src/usb/usb.c
     ${CMAKE_CURRENT_LIST_DIR}/src/fs/file.c
+    ${CMAKE_CURRENT_LIST_DIR}/src/fs/file_store.c
+    ${CMAKE_CURRENT_LIST_DIR}/src/fs/nvs/nvs.c
     ${CMAKE_CURRENT_LIST_DIR}/src/fs/vault_container.c
     ${CMAKE_CURRENT_LIST_DIR}/src/fs/object_store.c
     ${CMAKE_CURRENT_LIST_DIR}/src/fs/object_store_txn.c
