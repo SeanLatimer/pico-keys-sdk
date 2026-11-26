@@ -94,3 +94,17 @@ else()
 endif()
 
 add_test(NAME object_policy_test COMMAND object_policy_test)
+
+add_executable(nvs_test
+    ${CMAKE_CURRENT_LIST_DIR}/../src/fs/nvs/nvs.c
+    ${CMAKE_CURRENT_LIST_DIR}/nvs_test.c
+)
+target_include_directories(nvs_test PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
+
+if(MSVC)
+    target_compile_options(nvs_test PRIVATE /W4 /WX)
+else()
+    target_compile_options(nvs_test PRIVATE -Wall -Wextra -Werror -O2)
+endif()
+
+add_test(NAME nvs_test COMMAND nvs_test)
