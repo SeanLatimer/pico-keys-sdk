@@ -62,8 +62,17 @@ macro(SET_VERSION MAJOR MINOR FILE)
     set(${MINOR} ${ver_minor})
 endmacro()
 
+# The build number is the number of commits reachable from HEAD, so the same
+# commit gives the same number. A shallow clone counts only the commits it
+# has; pass -DPICO_BUILD_NUMBER=<n> to set it explicitly in that case.
 macro(SET_BUILD_NUMBER SOURCE_DIR)
-    execute_process(COMMAND git -c "safe.directory=${SOURCE_DIR}" rev-list --count HEAD WORKING_DIRECTORY "${SOURCE_DIR}" OUTPUT_VARIABLE PICO_BUILD_NUMBER OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    if(NOT PICO_BUILD_NUMBER)
+        execute_process(COMMAND git -c "safe.directory=${SOURCE_DIR}" rev-list --count HEAD WORKING_DIRECTORY "${SOURCE_DIR}" OUTPUT_VARIABLE PICO_BUILD_NUMBER OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+        execute_process(COMMAND git -c "safe.directory=${SOURCE_DIR}" rev-parse --is-shallow-repository WORKING_DIRECTORY "${SOURCE_DIR}" OUTPUT_VARIABLE _picokeys_shallow OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+        if(_picokeys_shallow STREQUAL "true")
+            message(WARNING "Shallow clone: build number ${PICO_BUILD_NUMBER} differs from a full clone of the same commit. Set -DPICO_BUILD_NUMBER to override.")
+        endif()
+    endif()
     # Without git history (ZIP download, repository without commits) the build number was empty
     # and the build failed in rescue.c (PICO_BUILD_NUMBER=). Default to 0.
     if(NOT PICO_BUILD_NUMBER MATCHES "^[0-9]+$")

@@ -15,27 +15,40 @@ set(MLKEM_PATH "${CMAKE_CURRENT_LIST_DIR}/../third-party/mlkem")
 set(MLDSA_PATH "${CMAKE_CURRENT_LIST_DIR}/../third-party/mldsa")
 set(LIBCVC_PATH "${CMAKE_CURRENT_LIST_DIR}/../third-party/libcvc")
 
+# Every dependency is pinned to a full commit SHA. The tag or branch it was
+# taken from is in the comment; update both together. A tag can be moved or
+# deleted upstream, a SHA cannot.
 set(PICOKEYS_MBEDTLS_STD_REPO "https://github.com/Mbed-TLS/mbedtls.git")
-set(PICOKEYS_MBEDTLS_STD_REF "v3.6.7")
+set(PICOKEYS_MBEDTLS_STD_REF "068ff080b369adfac81509f9b57b2afabaf82dc5") # v3.6.7
 set(PICOKEYS_MBEDTLS_EDDSA_REPO "https://github.com/polhenarejos/mbedtls.git")
-set(PICOKEYS_MBEDTLS_EDDSA_REF "v3.6.7-eddsa")
+set(PICOKEYS_MBEDTLS_EDDSA_REF "fc39404125e93ee00e6758605e6c6f2c8db440f1") # v3.6.7-eddsa
 
 set(PICOKEYS_TINYCBOR_REPO "https://github.com/intel/tinycbor.git")
-set(PICOKEYS_TINYCBOR_REF "v0.6.1")
+set(PICOKEYS_TINYCBOR_REF "c0aad2fb2137a31b9845fbaae3653540c410f215") # v0.6.1
 set(PICOKEYS_CJSON_REPO "https://github.com/DaveGamble/cJSON.git")
-set(PICOKEYS_CJSON_REF "v1.7.19")
+set(PICOKEYS_CJSON_REF "c859b25da02955fef659d658b8f324b5cde87be3") # v1.7.19
 set(PICOKEYS_MLKEM_REPO "https://github.com/pq-code-package/mlkem-native.git")
-set(PICOKEYS_MLKEM_REF "v1.2.0")
+set(PICOKEYS_MLKEM_REF "0ba906cb14b1c241476134d7403a811b382ca498") # v1.2.0
 set(PICOKEYS_MLDSA_REPO "https://github.com/pq-code-package/mldsa-native.git")
-set(PICOKEYS_MLDSA_REF "v1.0.0-beta2")
+set(PICOKEYS_MLDSA_REF "9b0ee84f4cf399043eca59eca4e5f8531ca1d61b") # v1.0.0-beta2
 set(PICOKEYS_LIBCVC_REPO "https://github.com/polhenarejos/libcvc.git")
-set(PICOKEYS_LIBCVC_REF "main")
+set(PICOKEYS_LIBCVC_REF "54562afc4d620c8bdb118183c0db49048baa0b2c") # main as of 2026-11-25
 
 set(PICOKEYS_FETCH_DEPS_ON_DEMAND ON CACHE BOOL "Fetch third-party deps into pico-keys-sdk/third-party when missing")
 
 function(picokeys_sync_dep name repo ref dest)
     set(_marker "${dest}/.picokeys_dep_source")
     set(_need_fetch OFF)
+    # A full 40-hex commit SHA is verified against the checked-out tree; a tag
+    # or branch name is still accepted but is not reproducible.
+    string(REGEX MATCH "^[0-9a-f]+$" _ref_hex "${ref}")
+    string(LENGTH "${ref}" _ref_len)
+    if(_ref_hex AND _ref_len EQUAL 40)
+        set(_ref_is_sha ON)
+    else()
+        set(_ref_is_sha OFF)
+        message(WARNING "[deps] ${name}: ref '${ref}' is not a commit SHA; the build is not pinned")
+    endif()
 
     if(NOT EXISTS "${dest}")
         if(NOT PICOKEYS_FETCH_DEPS_ON_DEMAND)
@@ -58,6 +71,20 @@ function(picokeys_sync_dep name repo ref dest)
         endif()
         if(NOT _repo_ok OR NOT _ref_ok)
             set(_need_fetch ON)
+        elseif(_ref_is_sha)
+            # The marker can be stale (tree checked out by hand, or copied
+            # from elsewhere): check the commit that is actually there.
+            execute_process(
+                COMMAND git -C ${dest} rev-parse HEAD
+                RESULT_VARIABLE _head_rc
+                OUTPUT_VARIABLE _head
+                ERROR_QUIET
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+            )
+            if(NOT _head_rc EQUAL 0 OR NOT _head STREQUAL "${ref}")
+                message(STATUS "[deps] ${name}: checked-out commit '${_head}' is not the pinned ${ref}")
+                set(_need_fetch ON)
+            endif()
         endif()
     endif()
 
@@ -90,6 +117,16 @@ function(picokeys_sync_dep name repo ref dest)
         endif()
         if(NOT EXISTS "${dest}")
             message(FATAL_ERROR "Failed to fetch ${name} into ${dest}")
+        endif()
+        if(_ref_is_sha)
+            execute_process(
+                COMMAND git -C ${dest} rev-parse HEAD
+                OUTPUT_VARIABLE _head
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+            )
+            if(NOT _head STREQUAL "${ref}")
+                message(FATAL_ERROR "${name}: checked out ${_head}, expected ${ref}")
+            endif()
         endif()
         file(WRITE "${_marker}" "REPO=${repo}\nREF=${ref}\n")
     else()

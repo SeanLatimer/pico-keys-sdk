@@ -137,6 +137,7 @@ static size_t hwrng_buf_del(struct hwrng_buf *rb, byte_array_t data) {
     }
     if (first) {
         memcpy(data.data, rb->buf + head, first);
+        memset(rb->buf + head, 0, first);
         head += first;
         if (head >= rb->size) {
             head = 0;
@@ -145,6 +146,7 @@ static size_t hwrng_buf_del(struct hwrng_buf *rb, byte_array_t data) {
     if (n > first) {
         size_t second = n - first;
         memcpy(data.data + first, rb->buf + head, second);
+        memset(rb->buf + head, 0, second);
         head += second;
     }
     rb->head = head;
@@ -168,6 +170,9 @@ void *hwrng_task(void) {
     hwrng_lock();
     if (hwrng_buf_space(rb) >= sizeof(random_word) && hwrng_mix_process()) {
         hwrng_buf_add(rb, CONST_BYTE_ARRAY((const uint8_t *)&random_word, sizeof(random_word)));
+        /* The word is now in the pool; do not keep a second copy. The next
+         * hwrng_mix_process() call reinitialises it because the round is 0. */
+        random_word = 0;
     }
     hwrng_unlock();
     return NULL;

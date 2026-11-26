@@ -19,6 +19,7 @@
 #include "serial.h"
 #include "crypto_utils.h"
 #include "pico_time.h"
+#include "bench/bench.h"
 #include <stdio.h>
 #ifdef PICO_PLATFORM
  #include "hardware/flash.h"
@@ -136,6 +137,7 @@ static uintptr_t pending_journal_addr;
 
 #if defined(PICO_PLATFORM) || defined(ESP_PLATFORM)
 static int do_flash_op_erase(uintptr_t addr) {
+    bench_t bench = bench_begin();
     if (multicore_lockout_start_timeout_us(1000) == false) {
         printf("WARN: FLASH LOCKOUT START TIMEOUT\n");
         return PICOKEYS_ERR_NO_MEMORY;
@@ -147,10 +149,12 @@ static int do_flash_op_erase(uintptr_t addr) {
         printf("WARN: FLASH LOCKOUT END TIMEOUT\n");
         return PICOKEYS_EXEC_ERROR;
     }
+    bench_end(BENCH_FLASH_ERASE, FLASH_SECTOR_SIZE, bench);
     return PICOKEYS_OK;
 }
 
 static int do_flash_op_program(uintptr_t addr, const uint8_t *data, size_t size) {
+    bench_t bench = bench_begin();
     if (multicore_lockout_start_timeout_us(1000) == false) {
         printf("WARN: FLASH LOCKOUT START TIMEOUT\n");
         return PICOKEYS_ERR_NO_MEMORY;
@@ -162,10 +166,12 @@ static int do_flash_op_program(uintptr_t addr, const uint8_t *data, size_t size)
         printf("WARN: FLASH LOCKOUT END TIMEOUT\n");
         return PICOKEYS_EXEC_ERROR;
     }
+    bench_end(BENCH_FLASH_PROGRAM, (uint32_t)size, bench);
     return PICOKEYS_OK;
 }
 
 static int do_flash_op_erase_program(uintptr_t addr, const uint8_t *data, size_t size) {
+    bench_t bench = bench_begin();
     if (multicore_lockout_start_timeout_us(1000) == false) {
         printf("WARN: FLASH LOCKOUT START TIMEOUT\n");
         return PICOKEYS_ERR_NO_MEMORY;
@@ -178,6 +184,7 @@ static int do_flash_op_erase_program(uintptr_t addr, const uint8_t *data, size_t
         printf("WARN: FLASH LOCKOUT END TIMEOUT\n");
         return PICOKEYS_EXEC_ERROR;
     }
+    bench_end(BENCH_FLASH_ERASE_PROGRAM, (uint32_t)size, bench);
     return PICOKEYS_OK;
 }
 

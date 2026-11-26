@@ -43,6 +43,7 @@
 #include "pico_time.h"
 #include "serial.h"
 #include "mbedtls/sha256.h"
+#include "bench/bench.h"
 
 extern int rescue_migrate_keydev(void);
 
@@ -167,6 +168,8 @@ int main(void) {
 #else
     emul_init("127.0.0.1", 35963);
 #endif
+
+    bench_init();
 
     random_init();
 
