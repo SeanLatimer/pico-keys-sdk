@@ -17,6 +17,7 @@
 
 #include "picokeys.h"
 #include "file.h"
+#include "counter_log.h"
 #include "tlv.h"
 #include "apdu.h"
 #include <stdio.h>
@@ -404,6 +405,9 @@ void file_scan_flash(void) {
     printf("SCAN\n");
     scan_region(true);
     scan_region(false);
+    /* Needs last_base from the scan: decides whether the retry-counter log
+       owns the first sectors of the data area. */
+    counter_log_boot();
 }
 
 uint8_t *file_read(const uint8_t *addr) {

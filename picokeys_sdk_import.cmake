@@ -369,6 +369,7 @@ list(APPEND PICOKEYS_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/src/fs/object_policy.c
     ${CMAKE_CURRENT_LIST_DIR}/src/fs/object_crypto_provider.c
     ${CMAKE_CURRENT_LIST_DIR}/src/fs/flash.c
+    ${CMAKE_CURRENT_LIST_DIR}/src/fs/counter_log.c
     ${CMAKE_CURRENT_LIST_DIR}/src/fs/low_flash.c
     ${CMAKE_CURRENT_LIST_DIR}/src/fs/phy.c
     ${CMAKE_CURRENT_LIST_DIR}/src/otp/otp.c

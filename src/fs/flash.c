@@ -57,14 +57,29 @@ uintptr_t end_flash, end_rom_pool, start_rom_pool, end_data_pool, start_data_poo
 uintptr_t last_base;
 uint32_t num_files = 0;
 
+static uintptr_t data_area_start;
+
 void flash_set_bounds(uintptr_t start, uintptr_t end) {
     end_flash = end;
     end_rom_pool = end_flash - FLASH_DATA_HEADER_SIZE - 4;
     start_rom_pool = end_rom_pool - FLASH_PERMANENT_REGION;
     end_data_pool = start_rom_pool - FLASH_DATA_HEADER_SIZE;
     start_data_pool = start;
+    data_area_start = start;
 
     last_base = end_data_pool;
+}
+
+/* Start of the data area, before any reservation. */
+uintptr_t flash_data_area_start(void) {
+    return data_area_start;
+}
+
+/* Keeps the file system, its journal and its redo sectors out of the first
+   `bytes` of the data area (the counter log uses them). Called once at boot,
+   after the scan, and only when nothing of the file system is there. */
+void flash_reserve_bottom(uint32_t bytes) {
+    start_data_pool = data_area_start + bytes;
 }
 
 static size_t flash_record_length_size(uintptr_t base) {

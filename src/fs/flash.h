@@ -34,6 +34,12 @@ extern uint32_t flash_num_files(void);
 extern uint32_t flash_size(void);
 
 extern void flash_set_bounds(uintptr_t start, uintptr_t end);
+extern uintptr_t flash_data_area_start(void);
+extern void flash_reserve_bottom(uint32_t bytes);
+#if defined(PICO_PLATFORM) || defined(ENABLE_EMULATION)
+extern int low_flash_raw(uintptr_t addr, const uint8_t *page);
+extern const uint8_t *low_flash_raw_ptr(uintptr_t addr);
+#endif
 extern int flash_write_data_to_file(file_t *file, const_byte_array_t data);
 extern int flash_write_data_to_file_offset(file_t *file, const_byte_array_t data, uint32_t offset);
 extern int flash_program_block(uintptr_t addr, const_byte_array_t data);

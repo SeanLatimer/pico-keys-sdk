@@ -198,11 +198,94 @@ static int journal_mark_done(void) {
 }
 #endif
 
+/* Raw flash access for the counter log (counter_log.c): programs one page or
+   erases one sector directly, without the sector cache, which always erases
+   before it programs. Programming only clears bits, as on NOR flash. Only
+   RP2040, RP2350 and the emulator; ESP32 keeps the old counters.
+
+   On the Pico the operation runs on core 0, which owns the flash; a caller
+   on core 1 (the card thread) waits for it, so it returns once the data is
+   in flash. */
+#if defined(PICO_PLATFORM)
+static volatile bool raw_pending = false;
+static uintptr_t raw_addr;
+static bool raw_erase;
+static uint8_t raw_page[FLASH_PAGE_SIZE];
+static volatile int raw_result = PICOKEYS_OK;
+
+static int raw_execute(void) {
+    int r = raw_erase ? do_flash_op_erase(raw_addr) : do_flash_op_program(raw_addr, raw_page, FLASH_PAGE_SIZE);
+    /* As elsewhere in this file, a late lockout release is only a warning:
+       the operation itself completed. */
+    return r == PICOKEYS_ERR_NO_MEMORY ? PICOKEYS_ERR_NO_MEMORY : PICOKEYS_OK;
+}
+#endif
+
+#if defined(PICO_PLATFORM) || defined(ENABLE_EMULATION)
+int low_flash_raw(uintptr_t addr, const uint8_t *page) {
+    if (page ? (addr % FLASH_PAGE_SIZE) != 0 : (addr % FLASH_SECTOR_SIZE) != 0) {
+        return PICOKEYS_ERR_NULL_PARAM;
+    }
+#if defined(PICO_PLATFORM)
+    if (get_core_num() == 0) {
+        raw_addr = addr;
+        raw_erase = page == NULL;
+        if (page) {
+            memcpy(raw_page, page, FLASH_PAGE_SIZE);
+        }
+        return raw_execute();
+    }
+    mutex_enter_blocking(&mtx_flash);
+    raw_addr = addr;
+    raw_erase = page == NULL;
+    if (page) {
+        memcpy(raw_page, page, FLASH_PAGE_SIZE);
+    }
+    raw_pending = true;
+    mutex_exit(&mtx_flash);
+    uint32_t start = board_millis();
+    while (raw_pending) {
+        if (board_millis() - start >= FLASH_CACHE_FLUSH_TIMEOUT_MS) {
+            return PICOKEYS_ERR_NO_MEMORY;
+        }
+        tight_loop_contents();
+    }
+    return raw_result;
+#else
+    uint8_t *m = map + addr;
+    if (page) {
+        for (size_t i = 0; i < FLASH_PAGE_SIZE; i++) {
+            m[i] &= page[i];
+        }
+    }
+    else {
+        memset(m, 0xFF, FLASH_SECTOR_SIZE);
+    }
+    msync(map, FLASH_SIZE_BYTES, MS_SYNC);
+    return PICOKEYS_OK;
+#endif
+}
+
+const uint8_t *low_flash_raw_ptr(uintptr_t addr) {
+#if defined(PICO_PLATFORM)
+    return (const uint8_t *)addr;
+#else
+    return map + addr;
+#endif
+}
+#endif
+
 void low_flash_task(void) {
 #ifdef ESP_PLATFORM
     bool flash_updated = false;
 #endif
     if (mutex_try_enter(&mtx_flash, NULL) == true) {
+#if defined(PICO_PLATFORM)
+        if (raw_pending) {
+            raw_result = raw_execute();
+            raw_pending = false;
+        }
+#endif
 #if defined(PICO_PLATFORM) || defined(ESP_PLATFORM)
         if (locked_out == true && journal_finalize_pending) {
             int ret = journal_mark_done();
