@@ -87,9 +87,13 @@ static int f_erase(void *ctx, uint32_t off, size_t len) {
 static const struct nvs_flash sim = { f_read, f_write, f_erase, NULL, 0xFF, 1 };
 
 static struct nvs_fs fs;
+static uint32_t cache[64];
+static uint16_t cache_slots = 64;
 
 static void mount(void) {
     memset(&fs, 0, sizeof(fs));
+    fs.lookup_cache = cache;
+    fs.lookup_cache_size = cache_slots;
     fs.sector_size = sector_size;
     fs.sector_count = (uint16_t)sector_count;
     fs.flash = &sim;
@@ -346,5 +350,8 @@ int main(void) {
     power_cut_sweep(2, 4096, 4, 600, 1);
     power_cut_sweep(3, 8192, 3, 900, 1);
     power_cut_sweep(4, 4096, 2, 200, 1);
+    /* one cache slot: every lookup collides and walks the log */
+    cache_slots = 1;
+    power_cut_sweep(5, 4096, 3, 300, 1);
     return 0;
 }

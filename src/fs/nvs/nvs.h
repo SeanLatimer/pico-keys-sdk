@@ -20,9 +20,6 @@
 #include <stdint.h>
 #include <sys/types.h>
 
-#ifndef NVS_LOOKUP_CACHE_SIZE
-#define NVS_LOOKUP_CACHE_SIZE 512
-#endif
 
 /* IDs at and above this are used by the store itself. */
 #define NVS_ID_RESERVED 0xFFFD
@@ -46,7 +43,8 @@ struct nvs_fs {
     uint16_t sector_count;     /* at least 2 */
     bool ready;
     const struct nvs_flash *flash;
-    uint32_t lookup_cache[NVS_LOOKUP_CACHE_SIZE];
+    uint32_t *lookup_cache;        /* set by the caller: lookup_cache_size slots */
+    uint16_t lookup_cache_size;    /* at least 1; more slots, shorter lookups */
 };
 
 /* One write of a batch. len 0 deletes the ID. */
@@ -77,9 +75,10 @@ int nvs_locate(struct nvs_fs *fs, uint16_t id, uint32_t *offset, size_t *len);
 
 /* Calls cb once for every stored id (not deleted ones), with the offset and length
  * of its current value. A non-zero return from cb stops the walk and is returned.
- * Not reentrant: uses an 8 KB static bitmap. */
+ * work is NVS_FOREACH_WORK bytes of scratch (one bit per id). */
+#define NVS_FOREACH_WORK 8192u
 typedef int (*nvs_foreach_cb)(void *ctx, uint16_t id, uint32_t offset, size_t len);
-int nvs_foreach(struct nvs_fs *fs, nvs_foreach_cb cb, void *ctx);
+int nvs_foreach(struct nvs_fs *fs, nvs_foreach_cb cb, void *ctx, uint8_t *work);
 
 /* Largest value one entry can hold. */
 #define NVS_MAX_VALUE(sector_size) ((sector_size) - 4 * 8 - 4)

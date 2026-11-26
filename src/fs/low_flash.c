@@ -89,7 +89,16 @@ typedef struct page_flash {
     size_t page_size; //this param is for easy erase. It allows to erase with a single call. IT DOES NOT APPLY TO WRITE
 }) page_flash_t;
 
-static page_flash_t flash_pages[TOTAL_FLASH_PAGES];
+#ifdef PICOKEYS_LEGACY_FS
+static page_flash_t flash_pages_static[TOTAL_FLASH_PAGES];
+static page_flash_t *flash_pages = flash_pages_static;
+#else
+/* The NVS file store (file_store.c) writes through low_flash_raw(); only its
+   one-off copy of an old file system needs this cache, so it exists just for
+   that (low_flash_cache_open/close). */
+static page_flash_t *flash_pages = NULL;
+#endif
+#define CACHE_PAGES (flash_pages ? TOTAL_FLASH_PAGES : 0)
 
 static mutex_t mtx_flash;
 
@@ -332,7 +341,7 @@ void low_flash_task(void) {
                 memset(journal_data, 0xFF, sizeof(data_page));
                 flash_journal_t *journal_entry = (flash_journal_t *)(journal_data + journal_slot * sizeof(flash_journal_t) % FLASH_PAGE_SIZE);
                 journal_entry->magic = JOURNAL_MAGIC;
-                for (int i = 0; i < TOTAL_FLASH_PAGES; i++) {
+                for (int i = 0; i < CACHE_PAGES; i++) {
                     if (flash_pages[i].ready == true) {
                         uintptr_t redo_offset = i * FLASH_SECTOR_SIZE;
                         if (redo_sector < start_data_pool + redo_offset) {
@@ -376,7 +385,7 @@ void low_flash_task(void) {
             }
             bool transaction_ok = true;
 #endif
-            for (int r = 0; r < TOTAL_FLASH_PAGES; r++) {
+            for (int r = 0; r < CACHE_PAGES; r++) {
                 if (flash_pages[r].ready == true) {
 #if defined(PICO_PLATFORM) || defined(ESP_PLATFORM)
                     int ret = do_flash_op_erase_program(flash_pages[r].address, flash_pages[r].page, FLASH_SECTOR_SIZE);
@@ -470,7 +479,7 @@ static bool journal_entry_header_valid(const flash_journal_t *entry) {
         return false;
     }
     bool has_target = false;
-    for (int i = 0; i < TOTAL_FLASH_PAGES; i++) {
+    for (int i = 0; i < CACHE_PAGES; i++) {
         uintptr_t addr = entry->target_addr[i];
         if (addr == 0 || addr == UINTPTR_MAX) {
             continue;
@@ -493,7 +502,7 @@ static bool journal_entry_valid_at(const flash_journal_t *entry, uintptr_t journ
     if (entry->status != JOURNAL_STATUS_PENDING && entry->status != JOURNAL_STATUS_DONE) {
         return false;
     }
-    for (int i = 0; i < TOTAL_FLASH_PAGES; i++) {
+    for (int i = 0; i < CACHE_PAGES; i++) {
         uintptr_t target = entry->target_addr[i];
         if (target == 0 || target == UINTPTR_MAX) {
             continue;
@@ -552,7 +561,7 @@ int low_flash_recover_journal(bool force) {
             continue;
         }
 
-        for (int i = 0; i < TOTAL_FLASH_PAGES; i++) {
+        for (int i = 0; i < CACHE_PAGES; i++) {
             uintptr_t target = candidate->target_addr[i];
             if (target == UINTPTR_MAX || target == 0x00000000) {
                 continue;
@@ -639,7 +648,9 @@ void low_flash_init(void) {
 #ifdef PICO_RP2040
     phymarker_write();
 #endif
-    memset(flash_pages, 0, sizeof(page_flash_t) * TOTAL_FLASH_PAGES);
+    if (flash_pages) {
+        memset(flash_pages, 0, sizeof(page_flash_t) * TOTAL_FLASH_PAGES);
+    }
     mutex_init(&mtx_flash);
 
     uint32_t data_start_addr;
@@ -697,6 +708,24 @@ void low_flash_init(void) {
     flash_set_bounds(data_start_addr, data_end_addr);
 }
 
+#ifndef PICOKEYS_LEGACY_FS
+int low_flash_cache_open(void) {
+    if (!flash_pages) {
+        flash_pages = calloc(TOTAL_FLASH_PAGES, sizeof(page_flash_t));
+        ready_pages = 0;
+    }
+    return flash_pages ? PICOKEYS_OK : PICOKEYS_ERR_NO_MEMORY;
+}
+
+void low_flash_cache_close(void) {
+    mutex_enter_blocking(&mtx_flash);
+    free(flash_pages);
+    flash_pages = NULL;
+    ready_pages = 0;
+    mutex_exit(&mtx_flash);
+}
+#endif
+
 void low_flash_init_core1(void) {
     mutex_enter_blocking(&mtx_flash);
     multicore_lockout_victim_init();
@@ -748,7 +777,7 @@ static page_flash_t *find_free_page(uintptr_t addr) {
     uintptr_t addr_alg = FLASH_SECTOR(addr);
 
     /* Reuse an existing cached sector before taking an empty slot. */
-    for (int r = 0; r < TOTAL_FLASH_PAGES; r++) {
+    for (int r = 0; r < CACHE_PAGES; r++) {
         if ((flash_pages[r].ready || flash_pages[r].erase) && flash_pages[r].address == addr_alg) {
             if (flash_pages[r].erase) {
                 flash_pages[r].erase = false;
@@ -759,7 +788,7 @@ static page_flash_t *find_free_page(uintptr_t addr) {
         }
     }
 
-    for (int r = 0; r < TOTAL_FLASH_PAGES; r++) {
+    for (int r = 0; r < CACHE_PAGES; r++) {
         if (!flash_pages[r].ready && !flash_pages[r].erase) {
             page_flash_t *p = &flash_pages[r];
             bool new_data_sector = addr_alg <= end_data_pool && addr_alg + FLASH_SECTOR_SIZE >= start_data_pool && addr_alg < FLASH_SECTOR(last_base) && addr_alg != FLASH_SECTOR(end_data_pool - 1);
@@ -831,7 +860,7 @@ uint8_t *flash_read(uintptr_t addr) {
     uintptr_t addr_alg = FLASH_SECTOR(addr);
     mutex_enter_blocking(&mtx_flash);
     if (ready_pages > 0) {
-        for (int r = 0; r < TOTAL_FLASH_PAGES; r++) {
+        for (int r = 0; r < CACHE_PAGES; r++) {
             if (flash_pages[r].ready && flash_pages[r].address == addr_alg) {
                 uint8_t *v = &flash_pages[r].page[addr & (FLASH_SECTOR_SIZE - 1)];
                 mutex_exit(&mtx_flash);
@@ -861,7 +890,7 @@ int flash_read_block(uintptr_t addr, byte_array_t data) {
         const uint8_t *source = NULL;
 
         mutex_enter_blocking(&mtx_flash);
-        for (int r = 0; r < TOTAL_FLASH_PAGES; r++) {
+        for (int r = 0; r < CACHE_PAGES; r++) {
             if (flash_pages[r].ready && flash_pages[r].address == addr_alg) {
                 source = &flash_pages[r].page[page_offset];
                 break;

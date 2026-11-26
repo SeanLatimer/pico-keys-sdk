@@ -106,7 +106,7 @@ static int nvs_prev_ate(struct nvs_fs *fs, uint32_t *addr, struct nvs_ate *ate);
 static int nvs_ate_valid(struct nvs_fs *fs, uint32_t entry_addr, const struct nvs_ate *entry);
 static int nvs_gc(struct nvs_fs *fs, struct nvs_gc_write_entry *entry);
 
-static inline size_t nvs_lookup_cache_pos(uint16_t id) {
+static inline size_t nvs_lookup_cache_pos(const struct nvs_fs *fs, uint16_t id) {
     uint16_t hash = id;
     /* 16-bit integer hash function found by https://github.com/skeeto/hash-prospector. */
     hash ^= hash >> 8;
@@ -114,7 +114,7 @@ static inline size_t nvs_lookup_cache_pos(uint16_t id) {
     hash ^= hash >> 7;
     hash *= 0xdb2dU;
     hash ^= hash >> 9;
-    return hash % NVS_LOOKUP_CACHE_SIZE;
+    return hash % fs->lookup_cache_size;
 }
 
 static int nvs_lookup_cache_rebuild(struct nvs_fs *fs) {
@@ -123,7 +123,7 @@ static int nvs_lookup_cache_rebuild(struct nvs_fs *fs) {
     uint32_t *cache_entry;
     struct nvs_ate ate;
 
-    memset(fs->lookup_cache, 0xff, sizeof(fs->lookup_cache));
+    memset(fs->lookup_cache, 0xff, fs->lookup_cache_size * sizeof(fs->lookup_cache[0]));
     addr = fs->ate_wra;
 
     while (true) {
@@ -132,7 +132,7 @@ static int nvs_lookup_cache_rebuild(struct nvs_fs *fs) {
         if (rc) {
             return rc;
         }
-        cache_entry = &fs->lookup_cache[nvs_lookup_cache_pos(ate.id)];
+        cache_entry = &fs->lookup_cache[nvs_lookup_cache_pos(fs, ate.id)];
         if (ate.id != 0xFFFF && *cache_entry == NVS_LOOKUP_CACHE_NO_ADDR && nvs_ate_valid(fs, ate_addr, &ate)) {
             *cache_entry = ate_addr;
         }
@@ -144,7 +144,7 @@ static int nvs_lookup_cache_rebuild(struct nvs_fs *fs) {
 }
 
 static void nvs_lookup_cache_invalidate(struct nvs_fs *fs, uint32_t sector) {
-    for (size_t i = 0; i < NVS_LOOKUP_CACHE_SIZE; i++) {
+    for (size_t i = 0; i < fs->lookup_cache_size; i++) {
         if ((fs->lookup_cache[i] >> ADDR_SECT_SHIFT) == sector) {
             fs->lookup_cache[i] = NVS_LOOKUP_CACHE_NO_ADDR;
         }
@@ -236,7 +236,7 @@ static int nvs_flash_ate_wrt(struct nvs_fs *fs, const struct nvs_ate *entry) {
     int rc = nvs_flash_al_wrt(fs, fs->ate_wra, entry, sizeof(struct nvs_ate));
     /* 0xFFFF is a special-purpose identifier. Exclude it from the cache */
     if (entry->id != 0xFFFF) {
-        fs->lookup_cache[nvs_lookup_cache_pos(entry->id)] = fs->ate_wra;
+        fs->lookup_cache[nvs_lookup_cache_pos(fs, entry->id)] = fs->ate_wra;
     }
     fs->ate_wra -= nvs_al_size(fs, sizeof(struct nvs_ate));
     return rc;
@@ -661,7 +661,7 @@ static int nvs_gc(struct nvs_fs *fs, struct nvs_gc_write_entry *entry) {
             continue;
         }
 
-        wlk_addr = fs->lookup_cache[nvs_lookup_cache_pos(gc_ate.id)];
+        wlk_addr = fs->lookup_cache[nvs_lookup_cache_pos(fs, gc_ate.id)];
         if (wlk_addr == NVS_LOOKUP_CACHE_NO_ADDR) {
             wlk_addr = fs->ate_wra;
         }
@@ -863,7 +863,7 @@ static int nvs_startup(struct nvs_fs *fs) {
         fs->data_wra = (fs->ate_wra & ADDR_SECT_MASK);
         /* gc uses the lookup cache, which is not built yet: point every slot at the
          * end of the fs; it is rebuilt afterwards */
-        for (i = 0; i < NVS_LOOKUP_CACHE_SIZE; i++) {
+        for (i = 0; i < fs->lookup_cache_size; i++) {
             fs->lookup_cache[i] = fs->ate_wra;
         }
         rc = nvs_gc(fs, NULL);
@@ -931,7 +931,7 @@ int nvs_mount(struct nvs_fs *fs) {
     size_t wbs;
 
     fs->ready = false;
-    if (!fs->flash || !fs->flash->read || !fs->flash->write || !fs->flash->erase) {
+    if (!fs->flash || !fs->flash->read || !fs->flash->write || !fs->flash->erase || !fs->lookup_cache || fs->lookup_cache_size == 0) {
         return -EINVAL;
     }
     wbs = fs->flash->write_block_size ? fs->flash->write_block_size : 1;
@@ -954,7 +954,7 @@ int nvs_mount(struct nvs_fs *fs) {
 
 /* Find the newest valid ate for id. Returns 1 and its address if found, 0 if not. */
 static int nvs_find(struct nvs_fs *fs, uint16_t id, uint32_t *ate_addr, struct nvs_ate *ate) {
-    uint32_t wlk_addr = fs->lookup_cache[nvs_lookup_cache_pos(id)], rd_addr;
+    uint32_t wlk_addr = fs->lookup_cache[nvs_lookup_cache_pos(fs, id)], rd_addr;
     int rc;
 
     if (wlk_addr == NVS_LOOKUP_CACHE_NO_ADDR) {
@@ -1186,7 +1186,7 @@ ssize_t nvs_read_hist(struct nvs_fs *fs, uint16_t id, void *data, size_t len, ui
     }
     cnt_his = 0U;
 
-    wlk_addr = fs->lookup_cache[nvs_lookup_cache_pos(id)];
+    wlk_addr = fs->lookup_cache[nvs_lookup_cache_pos(fs, id)];
     if (wlk_addr == NVS_LOOKUP_CACHE_NO_ADDR) {
         return -ENOENT;
     }
@@ -1256,18 +1256,17 @@ int nvs_locate(struct nvs_fs *fs, uint16_t id, uint32_t *offset, size_t *len) {
     return 0;
 }
 
-int nvs_foreach(struct nvs_fs *fs, nvs_foreach_cb cb, void *ctx) {
+int nvs_foreach(struct nvs_fs *fs, nvs_foreach_cb cb, void *ctx, uint8_t *seen) {
     uint32_t addr, ate_addr;
     struct nvs_ate ate;
     int rc;
-    /* one bit per id: the walk goes newest first, so the first sighting of an id
-     * is its current value, or its delete */
-    static uint8_t seen[8192];
 
     if (!fs->ready) {
         return -EACCES;
     }
-    memset(seen, 0, sizeof(seen));
+    /* one bit per id: the walk goes newest first, so the first sighting of an id
+     * is its current value, or its delete */
+    memset(seen, 0, NVS_FOREACH_WORK);
     addr = fs->ate_wra;
     while (true) {
         ate_addr = addr;

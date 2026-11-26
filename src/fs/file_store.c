@@ -89,6 +89,9 @@ typedef struct {
 } store_t;
 
 static store_t data_store, perm_store;
+/* NVS lookup caches: the data store holds hundreds of files, the persistent
+   store a handful */
+static uint32_t data_cache[512], perm_cache[32];
 static bool stores_ready = false;
 static uintptr_t stores_end;
 
@@ -106,7 +109,6 @@ static pending_t pending[MAX_PENDING];
 static size_t n_pending;
 
 static uint8_t chunk_used[CHUNK_IDS / 8];
-static uint8_t chunk_buf[CHUNK];
 
 static uint8_t *big_copy = NULL;    /* file_get_data() of a chunked file */
 static uint16_t big_copy_fid = 0;
@@ -178,6 +180,8 @@ static int store_wipe(store_t *s) {
 
 static int store_mount(store_t *s, uintptr_t base, uint16_t sectors) {
     memset(s, 0, sizeof(*s));
+    s->fs.lookup_cache = s == &perm_store ? perm_cache : data_cache;
+    s->fs.lookup_cache_size = s == &perm_store ? (uint16_t)(sizeof(perm_cache) / sizeof(perm_cache[0])) : (uint16_t)(sizeof(data_cache) / sizeof(data_cache[0]));
     s->base = base;
     s->sectors = sectors;
     s->flash.read = store_read;
@@ -374,8 +378,17 @@ static void index_rebuild(void) {
     if (!stores_ready) {
         return;
     }
-    nvs_foreach(&perm_store.fs, index_add, &perm_store);
-    nvs_foreach(&data_store.fs, index_add, &data_store);
+    /* the arena is empty whenever the index is rebuilt: borrow it */
+    uint8_t *work = n_pending == 0 ? arena : malloc(NVS_FOREACH_WORK);
+    if (!work) {
+        printf("ERROR: no memory to list the store\n");
+        return;
+    }
+    nvs_foreach(&perm_store.fs, index_add, &perm_store, work);
+    nvs_foreach(&data_store.fs, index_add, &data_store, work);
+    if (work != arena) {
+        free(work);
+    }
     /* chunks no head refers to: written before a power cut, never committed */
     for (uint32_t i = 0; i < CHUNK_IDS; i++) {
         bool seen = (chunk_seen[i / 8] >> (i % 8)) & 1;
@@ -416,28 +429,32 @@ static int store_batch(store_t *s, const struct nvs_batch_entry *e, size_t n) {
     return r;
 }
 
+/* The pending entries of one store, writes first, then deletes. */
+static size_t batch_of(bool perm, struct nvs_batch_entry *e) {
+    size_t n = 0;
+    for (int pass = 0; pass < 2; pass++) {
+        for (size_t i = 0; i < n_pending; i++) {
+            if (pending[i].perm != perm || pending[i].del != (pass == 1)) {
+                continue;
+            }
+            e[n].id = pending[i].id;
+            e[n].data = pending[i].del ? NULL : pending[i].buf;
+            e[n].len = pending[i].del ? 0 : pending[i].len;
+            n++;
+        }
+    }
+    return n;
+}
+
 static int store_flush(void) {
-    static struct nvs_batch_entry e_data[MAX_PENDING], e_perm[MAX_PENDING];
-    size_t nd = 0, np = 0;
+    static struct nvs_batch_entry e[MAX_PENDING];
 
     if (n_pending == 0) {
         return PICOKEYS_OK;
     }
-    /* writes first, then deletes */
-    for (int pass = 0; pass < 2; pass++) {
-        for (size_t i = 0; i < n_pending; i++) {
-            if (pending[i].del != (pass == 1)) {
-                continue;
-            }
-            struct nvs_batch_entry *e = pending[i].perm ? &e_perm[np++] : &e_data[nd++];
-            e->id = pending[i].id;
-            e->data = pending[i].del ? NULL : pending[i].buf;
-            e->len = pending[i].del ? 0 : pending[i].len;
-        }
-    }
-    int r = store_batch(&data_store, e_data, nd);
+    int r = store_batch(&data_store, e, batch_of(false, e));
     if (r == 0) {
-        r = store_batch(&perm_store, e_perm, np);
+        r = store_batch(&perm_store, e, batch_of(true, e));
     }
     if (r == 0) {
         index_repoint();
@@ -603,14 +620,17 @@ static int write_chunked(file_t *file, const_byte_array_t data, uint32_t offset,
     }
     old = file->data;
     uint8_t *head = arena_alloc(head_len);
-    if (!head) {
+    uint8_t *chunk_buf = malloc(CHUNK);
+    if (!head || !chunk_buf) {
+        free(chunk_buf);
         return PICOKEYS_ERR_NO_MEMORY;
     }
     wr16(head, FLASH_FILE_EXTENDED_LENGTH);
     wr32(head + 2, new_size);
     wr16(head + 6, (uint16_t)n_new);
+    int r = PICOKEYS_OK;
 
-    for (uint32_t i = 0; i < n_new; i++) {
+    for (uint32_t i = 0; i < n_new && r == PICOKEYS_OK; i++) {
         uint32_t c_start = i * CHUNK;
         uint32_t c_len = MIN(CHUNK, new_size - c_start);
         bool touched = !partial || !old_chunked || i >= n_old || (end > c_start && offset < c_start + c_len) ||
@@ -623,7 +643,8 @@ static int write_chunked(file_t *file, const_byte_array_t data, uint32_t offset,
         if (partial) {
             uint32_t keep = old_size > c_start ? MIN(c_len, old_size - c_start) : 0;
             if (keep && file_read_at(file, c_start, BYTE_ARRAY(chunk_buf, keep)) != PICOKEYS_OK) {
-                return PICOKEYS_ERR_MEMORY_FATAL;
+                r = PICOKEYS_ERR_MEMORY_FATAL;
+                break;
             }
         }
         uint32_t w_from = MAX(offset, c_start), w_to = MIN(end, c_start + c_len);
@@ -633,7 +654,8 @@ static int write_chunked(file_t *file, const_byte_array_t data, uint32_t offset,
         uint16_t id = 0;
         if (chunk_alloc(&id) != PICOKEYS_OK) {
             printf("ERROR: no chunk IDs left\n");
-            return PICOKEYS_ERR_NO_MEMORY;
+            r = PICOKEYS_ERR_NO_MEMORY;
+            break;
         }
         ssize_t w = nvs_write(&s->fs, id, chunk_buf, c_len);
         index_repoint();
@@ -641,17 +663,24 @@ static int write_chunked(file_t *file, const_byte_array_t data, uint32_t offset,
         if (w < 0) {
             printf("ERROR: writing part %u of file %x failed (%d)\n", (unsigned)i, file->fid, (int)w);
             chunk_mark(id, false);
-            return PICOKEYS_ERR_MEMORY_FATAL;
+            r = PICOKEYS_ERR_MEMORY_FATAL;
+            break;
         }
         wr16(head + HEAD_FIXED + 2 * i, id);
-        if (old_chunked && i < n_old) {
+    }
+    free(chunk_buf);
+    if (r != PICOKEYS_OK) {
+        /* nothing queued yet: the old file stays whole, and the chunks
+           written so far are unreferenced (deleted at the next boot) */
+        return r;
+    }
+    /* every old chunk the new head no longer uses */
+    for (uint32_t i = 0; i < n_old; i++) {
+        if (i >= n_new || head_chunk(head, i) != head_chunk(old, i)) {
             pending_add(head_chunk(old, i), perm, NULL, 0, true);
         }
     }
-    for (uint32_t i = n_new; i < n_old; i++) {
-        pending_add(head_chunk(old, i), perm, NULL, 0, true);
-    }
-    int r = pending_add(file->fid, perm, head, (uint32_t)head_len, false);
+    r = pending_add(file->fid, perm, head, (uint32_t)head_len, false);
     if (r != PICOKEYS_OK) {
         return r;
     }
@@ -844,7 +873,8 @@ static int store_put_direct(store_t *s, uint16_t fid, uint32_t size, int (*reade
     wr16(head, FLASH_FILE_EXTENDED_LENGTH);
     wr32(head + 2, size);
     wr16(head + 6, (uint16_t)n);
-    int r = PICOKEYS_OK;
+    uint8_t *chunk_buf = malloc(CHUNK);
+    int r = chunk_buf ? PICOKEYS_OK : PICOKEYS_ERR_NO_MEMORY;
     for (uint32_t i = 0; i < n && r == PICOKEYS_OK; i++) {
         uint32_t c_len = MIN(CHUNK, size - i * CHUNK);
         uint16_t id = 0;
@@ -857,6 +887,7 @@ static int store_put_direct(store_t *s, uint16_t fid, uint32_t size, int (*reade
         }
         wr16(head + HEAD_FIXED + 2 * i, id);
     }
+    free(chunk_buf);
     if (r == PICOKEYS_OK && nvs_write(&s->fs, fid, head, head_len) < 0) {
         r = PICOKEYS_ERR_MEMORY_FATAL;
     }
@@ -931,7 +962,19 @@ static bool legacy_present(void) {
 
 /* Copies every old file into the stores. Resumable: the stores are emptied
    first, and the format marker, written last, says the copy is complete. */
+static int legacy_migrate_open(void);
+
 static int legacy_migrate(void) {
+    /* the old reader and its journal replay go through the old cache */
+    if (low_flash_cache_open() != PICOKEYS_OK) {
+        return PICOKEYS_ERR_NO_MEMORY;
+    }
+    int r = legacy_migrate_open();
+    low_flash_cache_close();
+    return r;
+}
+
+static int legacy_migrate_open(void) {
     bool corrupted = false;
     legacy_walk(false, NULL, &corrupted);
     /* finish a commit the old firmware was in the middle of */
