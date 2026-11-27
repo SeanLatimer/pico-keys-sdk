@@ -18,9 +18,16 @@
  * Files kept in NVS (nvs/nvs.c) instead of being rewritten in place.
  *
  * Layout of the data area, bottom up: the counter log's two sectors
- * (counter_log.c), the data store, the persistent store (files marked
- * FILE_PERSISTENT, which INITIALIZE keeps), then whatever the old in-place file
- * system left, which is copied in once and erased.
+ * (counter_log.c), the persistent store (files marked FILE_PERSISTENT, which
+ * INITIALIZE keeps), then the data store up to the top of the area. The format
+ * marker in the persistent store records how many sectors the data store has,
+ * so a device keeps the layout it was formatted with.
+ *
+ * A device with the old in-place file system (at the top of the area) has its
+ * files copied into a data store below them; once they are erased the store
+ * grows to the top. A device formatted as PKS1 (data store at the bottom,
+ * 1 MB, persistent store above it) has its values copied to the top of the
+ * area, then into the PKS2 stores, the same way.
  *
  * A file of up to INLINE_MAX bytes is one value: a length (2 bytes, or FFFF and
  * 4 bytes) and the payload, as the old format stored it, so file_t and its
@@ -33,6 +40,10 @@
  * Chunks are written at once under fresh IDs that nothing refers to yet; the
  * head that refers to them, and the deletion of the chunks they replace, are
  * part of the batch.
+ *
+ * Objects (see file_store_kind_t) are charged in slots of SLOT_BYTES; the cap
+ * leaves HEADROOM_PERCENT of the data store free, so garbage collection always
+ * finds sectors that are mostly free.
  */
 
 #include "picokeys.h"
@@ -42,6 +53,7 @@
 #include "nvs/nvs.h"
 #include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #ifndef PICOKEYS_LEGACY_FS
 
@@ -54,13 +66,38 @@
 #endif
 
 #define STORE_SECTOR      0x4000u
+/* A cap on the data store, for tests that want garbage collection to run often. */
 #ifndef FILE_STORE_DATA_SECTORS
-#define FILE_STORE_DATA_SECTORS 64u      /* 1 MB */
+#define FILE_STORE_DATA_SECTORS 0xFFFFu
 #endif
 #define STORE_PERM_SECTORS 2u
+#define STORE_MIN_DATA_SECTORS 4u
 #define STORE_MAX_VALUE   NVS_MAX_VALUE(STORE_SECTOR)
 #define STORE_FORMAT_ID   FILE_STORE_RESERVED_FID   /* in the persistent store */
-static const uint8_t store_format[4] = { 'P', 'K', 'S', '1' };
+
+/* PKS2 marker: magic, offset of the data store from the persistent store's
+   start, data store sectors, reserved */
+#define MARKER_SIZE 12u
+static const uint8_t pks2_magic[4] = { 'P', 'K', 'S', '2' };
+static const uint8_t pks1_magic[4] = { 'P', 'K', 'S', '1' };
+#define PKS1_DATA_SECTORS 64u
+
+/* the copy of a PKS1 device's values at the top of the area, while it moves */
+static const uint8_t move_magic[4] = { 'P', 'K', 'S', 'M' };
+#define MOVE_HEADER 16u     /* magic, payload length, payload CRC, value count */
+#define MOVE_RECORD 8u      /* store, 0, id, length; then the value, padded to 4 */
+
+#ifndef PICOKEYS_STORE_SLOTS_MAX
+#define PICOKEYS_STORE_SLOTS_MAX 512u
+#endif
+#ifndef PICOKEYS_STORE_SLOT_BYTES
+#define PICOKEYS_STORE_SLOT_BYTES 4096u
+#endif
+#ifndef PICOKEYS_STORE_HEADROOM_PERCENT
+#define PICOKEYS_STORE_HEADROOM_PERCENT 30u
+#endif
+_Static_assert(PICOKEYS_STORE_HEADROOM_PERCENT >= 10u && PICOKEYS_STORE_HEADROOM_PERCENT < 100u, "headroom between 10 and 99 percent");
+_Static_assert(PICOKEYS_STORE_SLOT_BYTES >= 1024u, "slots of at least 1 KB");
 
 /* Two chunks, each with its 4-byte CRC and 8-byte entry, fit a store sector
    beside the 3 entries every sector keeps (close, gc done, one for a delete).
@@ -213,6 +250,7 @@ static const uint8_t *store_ptr(store_t *s, uint16_t id, size_t *len) {
 }
 
 static bool in_arena(const uint8_t *p);
+static int slots_check(const file_t *file, uint32_t new_size);
 
 static void repoint(file_t *file) {
     if (!file->data || in_arena(file->data) || (file_get_type(file) & FILE_DATA_FUNC) != 0) {
@@ -704,6 +742,10 @@ static int store_write(file_t *file, const_byte_array_t data, uint32_t offset, b
         return PICOKEYS_ERR_NO_MEMORY;
     }
     uint32_t new_size = partial ? MAX(old_size, offset + len) : len;
+    int r = slots_check(file, new_size);
+    if (r != PICOKEYS_OK) {
+        return r;
+    }
     big_copy_drop(file->fid);
     if (chunked(new_size)) {
         return write_chunked(file, data, partial ? offset : 0, partial, new_size);
@@ -960,8 +1002,8 @@ static bool legacy_present(void) {
     return !((r1 == 0xffffffff || r1 == 0xefefefef) && (r2 == 0xffffffff || r2 == 0xefefefef));
 }
 
-/* Copies every old file into the stores. Resumable: the stores are emptied
-   first, and the format marker, written last, says the copy is complete. */
+/* Copies every old file into the stores, which the caller has emptied.
+   Resumable: the format marker, written last, says the copy is complete. */
 static int legacy_migrate_open(void);
 
 static int legacy_migrate(void) {
@@ -982,11 +1024,6 @@ static int legacy_migrate_open(void) {
         printf("INFO: flash redo restored\n");
     }
     corrupted = false;
-    if (store_wipe(&data_store) != PICOKEYS_OK || store_wipe(&perm_store) != PICOKEYS_OK ||
-        store_mount(&data_store, data_store.base, data_store.sectors) != 0 ||
-        store_mount(&perm_store, perm_store.base, perm_store.sectors) != 0) {
-        return PICOKEYS_ERR_MEMORY_FATAL;
-    }
     memset(chunk_used, 0, sizeof(chunk_used));
     int r = legacy_walk(true, legacy_copy, &corrupted);
     if (r == 0) {
@@ -1002,72 +1039,373 @@ static int legacy_migrate_open(void) {
     return PICOKEYS_OK;
 }
 
-/* Everything above the stores belonged to the old file system. */
-static void legacy_erase(void) {
-    for (uintptr_t a = stores_end; a + FS_ERASE <= end_flash; a += FS_ERASE) {
-        if (!region_blank(a, FS_ERASE)) {
-            low_flash_raw(a, NULL);
+/* Emulator builds stop dead at the point PICO_HSM_STORE_CRASH names, as a
+   power cut would, so tests can check every step of a move resumes. */
+#ifdef ENABLE_EMULATION
+static void crash_point(const char *name) {
+    const char *at = getenv("PICO_HSM_STORE_CRASH");
+    if (at && strcmp(at, name) == 0) {
+        printf("INFO: store crash point %s\n", name);
+        fflush(stdout);
+        _Exit(3);
+    }
+}
+#else
+#define crash_point(name) ((void)0)
+#endif
+
+/* layout */
+
+static uintptr_t area_base(void) {
+    return (flash_data_area_start() + 2 * FS_ERASE + FS_ERASE - 1) & ~(uintptr_t)(FS_ERASE - 1);
+}
+
+static uintptr_t data_base(void) {
+    return area_base() + STORE_PERM_SECTORS * STORE_SECTOR;
+}
+
+/* the data store's size once nothing else is in the area */
+static uint32_t full_sectors(void) {
+    uintptr_t b = data_base();
+    uint32_t n = end_flash > b ? (uint32_t)((end_flash - b) / STORE_SECTOR) : 0;
+    return MIN(n, FILE_STORE_DATA_SECTORS);
+}
+
+static int erase_range(uintptr_t from, uintptr_t to) {
+    for (uintptr_t a = from; a + FS_ERASE <= to; a += FS_ERASE) {
+        if (!region_blank(a, FS_ERASE) && low_flash_raw(a, NULL) != PICOKEYS_OK) {
+            return PICOKEYS_ERR_MEMORY_FATAL;
         }
     }
+    return PICOKEYS_OK;
+}
+
+static int marker_write(uint16_t data_sectors) {
+    uint8_t m[MARKER_SIZE] = { 0 };
+    memcpy(m, pks2_magic, sizeof(pks2_magic));
+    wr32(m + 4, STORE_PERM_SECTORS * STORE_SECTOR);
+    wr16(m + 8, data_sectors);
+    return nvs_write(&perm_store.fs, STORE_FORMAT_ID, m, sizeof(m)) < 0 ? PICOKEYS_ERR_MEMORY_FATAL : PICOKEYS_OK;
+}
+
+/* data store sectors from the marker; 0 if there is none, 0xFFFF if it is not
+   one this firmware understands */
+static uint16_t marker_read(void) {
+    uint8_t m[MARKER_SIZE];
+    if (nvs_read(&perm_store.fs, STORE_FORMAT_ID, m, sizeof(m)) != (ssize_t)sizeof(m) || memcmp(m, pks2_magic, sizeof(pks2_magic)) != 0) {
+        return 0;
+    }
+    if (rd32(m + 4) != STORE_PERM_SECTORS * STORE_SECTOR || rd16(m + 8) < STORE_MIN_DATA_SECTORS) {
+        return 0xFFFF;
+    }
+    return rd16(m + 8);
+}
+
+/* Both stores empty, mounted with `sectors` data sectors. */
+static int stores_fresh(uint16_t sectors) {
+    if (erase_range(area_base(), data_base() + (uintptr_t)sectors * STORE_SECTOR) != PICOKEYS_OK ||
+        store_mount(&perm_store, area_base(), STORE_PERM_SECTORS) != 0 || store_mount(&data_store, data_base(), sectors) != 0) {
+        return PICOKEYS_ERR_MEMORY_FATAL;
+    }
+    return PICOKEYS_OK;
+}
+
+/* Grows the data store to `full` sectors if it has never wrapped: values from
+   sector 0 up to the write sector, every sector after that blank. A store of
+   the larger size would hold exactly that after the same writes. */
+static void store_grow(uint32_t full) {
+    uint32_t m = data_store.sectors, k = data_store.fs.ate_wra >> 16;
+    if (m >= full || k + 3 > m) {
+        return;
+    }
+    if (!region_blank(data_store.base + (k + 1) * STORE_SECTOR, (full - k - 1) * STORE_SECTOR)) {
+        return;
+    }
+    if (marker_write((uint16_t)full) != PICOKEYS_OK || store_mount(&data_store, data_store.base, (uint16_t)full) != 0) {
+        printf("ERROR: file store could not grow\n");
+        return;
+    }
+    printf("INFO: file store grown to %u sectors\n", (unsigned)full);
+}
+
+/* Everything above the data store belonged to an earlier layout. */
+static void stores_finish(uint32_t full) {
+    stores_end = data_store.base + (uintptr_t)data_store.sectors * STORE_SECTOR;
+    erase_range(stores_end, end_flash);
+    crash_point("erased");
+    store_grow(full);
+    stores_end = data_store.base + (uintptr_t)data_store.sectors * STORE_SECTOR;
+}
+
+/* PKS1 -> PKS2 */
+
+static void pks1_geometry(uintptr_t *perm, uint16_t *sectors) {
+    uintptr_t base = area_base();
+    uint32_t avail = end_flash > base ? (uint32_t)(end_flash - base) : 0;
+    uint32_t half = avail / 2 / STORE_SECTOR;
+    *sectors = (uint16_t)(half > STORE_PERM_SECTORS ? MIN(PKS1_DATA_SECTORS, half - STORE_PERM_SECTORS) : 0);
+    *perm = base + (uintptr_t)*sectors * STORE_SECTOR;
+}
+
+static bool pks1_present(void) {
+    uintptr_t perm;
+    uint16_t sectors;
+    pks1_geometry(&perm, &sectors);
+    if (sectors < STORE_MIN_DATA_SECTORS) {
+        return false;
+    }
+    store_t probe;
+    memset(&probe, 0, sizeof(probe));
+    probe.base = perm;
+    probe.flash.read = store_read;
+    probe.flash.ctx = &probe;
+    probe.flash.erase_value = 0xFF;
+    probe.flash.write_block_size = 1;
+    uint8_t m[sizeof(pks1_magic)];
+    return nvs_peek(&probe.flash, STORE_SECTOR, STORE_PERM_SECTORS, STORE_FORMAT_ID, m, sizeof(m)) == (ssize_t)sizeof(m) &&
+           memcmp(m, pks1_magic, sizeof(m)) == 0;
+}
+
+/* The copy sits in the top sectors of the full data store: its header in the
+   last sector, the values below it. */
+static uintptr_t move_header(void) {
+    return data_base() + (uintptr_t)(full_sectors() - 1) * STORE_SECTOR;
+}
+
+static uint32_t move_payload_len(void) {
+    const uint8_t *h = low_flash_raw_ptr(move_header());
+    return memcmp(h, move_magic, sizeof(move_magic)) == 0 ? rd32(h + 4) : 0;
+}
+
+static uintptr_t move_base(uint32_t len) {
+    uint32_t span = (len + STORE_SECTOR - 1) & ~(uint32_t)(STORE_SECTOR - 1);
+    return move_header() - span;
+}
+
+static bool move_valid(void) {
+    const uint8_t *h = low_flash_raw_ptr(move_header());
+    uint32_t len = move_payload_len();
+    if (len == 0 || len > move_header() - data_base() - STORE_MIN_DATA_SECTORS * STORE_SECTOR) {
+        return false;
+    }
+    return nvs_crc32(low_flash_raw_ptr(move_base(len)), len) == rd32(h + 8);
+}
+
+typedef struct {
+    store_t out;        /* program access to the copy */
+    uint32_t len;
+    uint32_t count;
+    bool perm;
+    bool write;
+} move_ctx_t;
+
+static int move_add(void *ctx, uint16_t id, uint32_t off, size_t len) {
+    move_ctx_t *m = ctx;
+    store_t *src = m->perm ? &perm_store : &data_store;
+    if (id == STORE_FORMAT_ID) {
+        return 0;
+    }
+    if (m->write) {
+        uint8_t rec[MOVE_RECORD] = { 0 };
+        rec[0] = m->perm ? 1 : 0;
+        wr16(rec + 2, id);
+        wr32(rec + 4, (uint32_t)len);
+        if (store_program(&m->out, m->len, rec, sizeof(rec)) != 0 ||
+            (len > 0 && store_program(&m->out, m->len + MOVE_RECORD, low_flash_raw_ptr(src->base + off), len) != 0)) {
+            return -EIO;
+        }
+    }
+    m->len += MOVE_RECORD + (((uint32_t)len + 3u) & ~3u);
+    m->count++;
+    return 0;
+}
+
+static int move_walk(move_ctx_t *m, uint8_t *work) {
+    m->len = 0;
+    m->count = 0;
+    m->perm = true;
+    int r = nvs_foreach(&perm_store.fs, move_add, m, work);
+    m->perm = false;
+    if (r == 0) {
+        r = nvs_foreach(&data_store.fs, move_add, m, work);
+    }
+    return r;
+}
+
+/* Copies the PKS1 stores' values to the top of the area, then erases the PKS1
+   stores, their marker first. */
+static int pks1_copy_out(void) {
+    uintptr_t perm;
+    uint16_t sectors;
+    pks1_geometry(&perm, &sectors);
+    uintptr_t pks1_end = perm + STORE_PERM_SECTORS * STORE_SECTOR;
+    if (store_mount(&data_store, area_base(), sectors) != 0 || store_mount(&perm_store, perm, STORE_PERM_SECTORS) != 0) {
+        return PICOKEYS_ERR_MEMORY_FATAL;
+    }
+    uint8_t *work = malloc(NVS_FOREACH_WORK);
+    if (!work) {
+        return PICOKEYS_ERR_NO_MEMORY;
+    }
+    move_ctx_t m;
+    memset(&m, 0, sizeof(m));
+    int r = move_walk(&m, work);
+    uintptr_t base = move_base(m.len);
+    if (r == 0 && (base < pks1_end || base - data_base() < STORE_MIN_DATA_SECTORS * STORE_SECTOR)) {
+        printf("ERROR: no room to move the PKS1 store\n");
+        r = -ENOSPC;
+    }
+    if (r == 0) {
+        r = erase_range(base, move_header() + STORE_SECTOR) == PICOKEYS_OK ? 0 : -EIO;
+    }
+    if (r == 0) {
+        m.out.base = base;
+        m.write = true;
+        r = move_walk(&m, work);
+    }
+    free(work);
+    if (r != 0) {
+        return PICOKEYS_ERR_MEMORY_FATAL;
+    }
+    uint8_t h[MOVE_HEADER];
+    memcpy(h, move_magic, sizeof(move_magic));
+    wr32(h + 4, m.len);
+    wr32(h + 8, nvs_crc32(low_flash_raw_ptr(base), m.len));
+    wr32(h + 12, m.count);
+    store_t out;
+    memset(&out, 0, sizeof(out));
+    out.base = move_header();
+    if (store_program(&out, 0, h, sizeof(h)) != 0 || !move_valid()) {
+        return PICOKEYS_ERR_MEMORY_FATAL;
+    }
+    crash_point("copied-out");
+    /* from here on the copy at the top is the one to use */
+    if (erase_range(perm, pks1_end) != PICOKEYS_OK) {
+        return PICOKEYS_ERR_MEMORY_FATAL;
+    }
+    crash_point("pks1-half-erased");
+    if (erase_range(area_base(), perm) != PICOKEYS_OK) {
+        return PICOKEYS_ERR_MEMORY_FATAL;
+    }
+    printf("INFO: PKS1 store copied out (%u values)\n", (unsigned)m.count);
+    return PICOKEYS_OK;
+}
+
+/* From the copy at the top into new PKS2 stores below it. Resumable: the
+   stores are emptied first and the marker is written last. */
+static int move_copy_in(void) {
+    uint32_t len = move_payload_len();
+    uintptr_t base = move_base(len);
+    uint16_t sectors = (uint16_t)((base - data_base()) / STORE_SECTOR);
+    if (stores_fresh(sectors) != PICOKEYS_OK) {
+        return PICOKEYS_ERR_MEMORY_FATAL;
+    }
+    const uint8_t *p = low_flash_raw_ptr(base), *end = p + len;
+    while (p < end) {
+        uint16_t id = rd16(p + 2);
+        uint32_t vlen = rd32(p + 4);
+        store_t *s = p[0] ? &perm_store : &data_store;
+        if (vlen > STORE_MAX_VALUE || nvs_write(&s->fs, id, p + MOVE_RECORD, vlen) < 0) {
+            return PICOKEYS_ERR_MEMORY_FATAL;
+        }
+        p += MOVE_RECORD + ((vlen + 3u) & ~3u);
+        if (p >= end - len / 2) {
+            crash_point("copy-in");
+        }
+    }
+    if (marker_write(sectors) != PICOKEYS_OK) {
+        return PICOKEYS_ERR_MEMORY_FATAL;
+    }
+    printf("INFO: files moved to the PKS2 store\n");
+    return PICOKEYS_OK;
+}
+
+static int count_value(void *ctx, uint16_t id, uint32_t off, size_t len) {
+    (void)id;
+    (void)off;
+    (void)len;
+    (*(uint32_t *)ctx)++;
+    return 0;
+}
+
+/* Whether the mounted persistent store holds anything (or cannot be listed). */
+static bool perm_has_values(void) {
+    uint8_t *work = malloc(NVS_FOREACH_WORK);
+    if (!work) {
+        return true;
+    }
+    uint32_t n = 0;
+    int r = nvs_foreach(&perm_store.fs, count_value, &n, work);
+    free(work);
+    return r != 0 || n > 0;
 }
 
 static int stores_open(void) {
-    uintptr_t base = (flash_data_area_start() + 2 * FS_ERASE + FS_ERASE - 1) & ~(uintptr_t)(FS_ERASE - 1);
-    uint32_t avail = end_flash > base ? (uint32_t)(end_flash - base) : 0;
-    if (avail / 2 / STORE_SECTOR < STORE_PERM_SECTORS + 4) {
+    uint32_t full = full_sectors();
+    if (full < STORE_MIN_DATA_SECTORS + 2) {
         printf("ERROR: data area too small for the file store\n");
         return PICOKEYS_ERR_MEMORY_FATAL;
     }
-    /* at most half the area, so an old file system above can be copied in */
-    uint32_t data_sectors = MIN(FILE_STORE_DATA_SECTORS, avail / 2 / STORE_SECTOR - STORE_PERM_SECTORS);
-    uintptr_t perm_base = base + data_sectors * STORE_SECTOR;
-    stores_end = perm_base + STORE_PERM_SECTORS * STORE_SECTOR;
-
-    int rd = store_mount(&data_store, base, (uint16_t)data_sectors);
-    int rp = store_mount(&perm_store, perm_base, STORE_PERM_SECTORS);
-    uint8_t marker[sizeof(store_format)];
-    bool formatted = rp == 0 && nvs_read(&perm_store.fs, STORE_FORMAT_ID, marker, sizeof(marker)) == (ssize_t)sizeof(marker) &&
-                     memcmp(marker, store_format, sizeof(marker)) == 0;
-    if (formatted) {
-        if (rd != 0) {
-            printf("ERROR: file store does not mount (%d)\n", rd);
+    if (pks1_present()) {
+        int r = pks1_copy_out();
+        if (r != PICOKEYS_OK) {
+            /* the PKS1 stores are untouched until the copy is complete */
+            printf("ERROR: moving the PKS1 store failed (%d)\n", r);
+            return r;
+        }
+    }
+    uint16_t sectors = store_mount(&perm_store, area_base(), STORE_PERM_SECTORS) == 0 ? marker_read() : 0;
+    if (sectors != 0 && (sectors == 0xFFFF || sectors > (end_flash - data_base()) / STORE_SECTOR)) {
+        printf("ERROR: file store marker does not fit this flash\n");
+        return PICOKEYS_ERR_MEMORY_FATAL;
+    }
+    if (sectors != 0) {
+        if (store_mount(&data_store, data_base(), sectors) != 0) {
+            printf("ERROR: file store does not mount\n");
             return PICOKEYS_ERR_MEMORY_FATAL;
         }
     }
-    else {
-        /* Not formatted: a new device, or one with the old file system. What
-           the store regions hold is at most an unfinished earlier copy, unless
-           old files reach down into them: then touch nothing. */
-        bool legacy = legacy_present();
-        if (legacy) {
-            bool corrupted = false;
-            legacy_walk(false, NULL, &corrupted);
-            /* below the lowest record: the old journal sector and six redo sectors */
-            uintptr_t lowest = (last_base & ~(uintptr_t)(FS_ERASE - 1)) - 7 * FS_ERASE;
-            if (lowest < stores_end) {
-                printf("ERROR: old files reach into the store region; not moving them\n");
-                return PICOKEYS_ERR_MEMORY_FATAL;
-            }
-        }
-        if (rd != 0 || rp != 0) {
-            if (store_wipe(&data_store) != PICOKEYS_OK || store_wipe(&perm_store) != PICOKEYS_OK ||
-                store_mount(&data_store, base, (uint16_t)data_sectors) != 0 || store_mount(&perm_store, perm_base, STORE_PERM_SECTORS) != 0) {
-                return PICOKEYS_ERR_MEMORY_FATAL;
-            }
-        }
-        if (legacy) {
-            int r = legacy_migrate();
-            if (r != PICOKEYS_OK) {
-                printf("ERROR: moving files to the new store failed (%d); old files left as they were\n", r);
-                return r;
-            }
-        }
-        if (nvs_write(&perm_store.fs, STORE_FORMAT_ID, store_format, sizeof(store_format)) < 0) {
-            return PICOKEYS_ERR_MEMORY_FATAL;
+    else if (move_valid()) {
+        int r = move_copy_in();
+        if (r != PICOKEYS_OK) {
+            printf("ERROR: moving files to the PKS2 store failed (%d)\n", r);
+            return r;
         }
     }
-    /* after the marker: drop the old copies (also finishes an interrupted erase) */
-    legacy_erase();
+    else if (legacy_present()) {
+        /* below the lowest record: the old journal sector and six redo sectors */
+        bool corrupted = false;
+        legacy_walk(false, NULL, &corrupted);
+        uintptr_t lowest = (last_base & ~(uintptr_t)(FS_ERASE - 1)) - 7 * FS_ERASE;
+        uint32_t below = lowest > data_base() ? (uint32_t)((lowest - data_base()) / STORE_SECTOR) : 0;
+        if (below < STORE_MIN_DATA_SECTORS) {
+            printf("ERROR: old files reach into the store region; not moving them\n");
+            return PICOKEYS_ERR_MEMORY_FATAL;
+        }
+        sectors = (uint16_t)MIN(below, full);
+        int r = stores_fresh(sectors);
+        if (r == PICOKEYS_OK) {
+            r = legacy_migrate();
+        }
+        if (r == PICOKEYS_OK) {
+            crash_point("legacy-copied");
+            r = marker_write(sectors);
+        }
+        if (r != PICOKEYS_OK) {
+            printf("ERROR: moving files to the new store failed (%d); old files left as they were\n", r);
+            return r;
+        }
+    }
+    else if (perm_store.fs.ready && perm_has_values()) {
+        /* files but no marker this firmware reads: never format over them */
+        printf("ERROR: file store has no readable format marker; not touching it\n");
+        return PICOKEYS_ERR_MEMORY_FATAL;
+    }
+    else if (stores_fresh((uint16_t)full) != PICOKEYS_OK || marker_write((uint16_t)full) != PICOKEYS_OK) {
+        return PICOKEYS_ERR_MEMORY_FATAL;
+    }
+    crash_point("marked");
+    /* drops the old files or the moved copy, then grows into their space */
+    stores_finish(full);
     stores_ready = true;
     return PICOKEYS_OK;
 }
@@ -1110,6 +1448,8 @@ static bool add_size(file_t *file, void *ctx) {
     return true;
 }
 
+/* Byte figures, for debug builds: every file's payload, and the data store's
+   raw size and what NVS has left. */
 uint32_t flash_used_space(void) {
     uint32_t used = 0;
     file_for_each_dynamic(add_size, &used);
@@ -1117,16 +1457,124 @@ uint32_t flash_used_space(void) {
 }
 
 uint32_t flash_total_space(void) {
-    return stores_ready ? (uint32_t)(data_store.sectors - 1) * (STORE_SECTOR - 16) : 0;
+    return stores_ready ? (uint32_t)data_store.sectors * STORE_SECTOR : 0;
 }
 
 uint32_t flash_free_space(void) {
-    uint32_t total = flash_total_space(), used = flash_used_space();
-    return used < total ? total - used : 0;
+    if (!stores_ready) {
+        return 0;
+    }
+    ssize_t f = nvs_calc_free_space(&data_store.fs);
+    return f > 0 ? (uint32_t)f : 0;
 }
 
 uint32_t flash_num_files(void) {
     return num_files;
+}
+
+/* slots */
+
+static file_store_kind_t (*store_classify)(uint16_t fid) = NULL;
+static bool store_full = false;
+
+void file_store_set_classifier(file_store_kind_t (*classify)(uint16_t fid)) {
+    store_classify = classify;
+}
+
+bool file_store_take_full(void) {
+    bool f = store_full;
+    store_full = false;
+    return f;
+}
+
+static uint32_t slots_for(uint32_t bytes) {
+    return (bytes + PICOKEYS_STORE_SLOT_BYTES - 1) / PICOKEYS_STORE_SLOT_BYTES;
+}
+
+static uint32_t slots_total(void) {
+    if (!stores_ready) {
+        return 0;
+    }
+    uint64_t room = (uint64_t)data_store.sectors * STORE_SECTOR * (100u - PICOKEYS_STORE_HEADROOM_PERCENT) / 100u;
+    return (uint32_t)MIN((uint64_t)PICOKEYS_STORE_SLOTS_MAX, room / PICOKEYS_STORE_SLOT_BYTES);
+}
+
+typedef struct {
+    uint32_t object_slots;
+    uint32_t part_bytes;
+    uint32_t objects;
+    uint16_t skip;          /* the file being written, counted by the caller */
+    bool skipping;
+} tally_t;
+
+static bool tally_cb(file_t *file, void *ctx) {
+    tally_t *t = ctx;
+    if (t->skipping && file->fid == t->skip) {
+        return true;
+    }
+    uint32_t size = file_get_size(file);
+    switch (store_classify(file->fid)) {
+        case FILE_STORE_OBJECT:
+            t->object_slots += slots_for(size);
+            t->objects += size > 0 ? 1 : 0;
+            break;
+        case FILE_STORE_PART:
+            t->part_bytes += size;
+            break;
+        case FILE_STORE_FREE:
+            break;
+    }
+    return true;
+}
+
+static void tally(tally_t *t, const file_t *skip) {
+    memset(t, 0, sizeof(*t));
+    if (skip) {
+        t->skip = skip->fid;
+        t->skipping = true;
+    }
+    if (store_classify) {
+        file_for_each_dynamic(tally_cb, t);
+    }
+}
+
+void file_store_usage(file_store_usage_t *usage) {
+    tally_t t;
+    tally(&t, NULL);
+    usage->slots_used = t.object_slots + slots_for(t.part_bytes);
+    usage->slots_total = slots_total();
+    usage->slot_bytes = PICOKEYS_STORE_SLOT_BYTES;
+    usage->objects = t.objects;
+}
+
+/* Refuses a write that would take the slots in use past the cap. A write that
+   does not add slots is always allowed, so a full store can still be changed
+   and emptied. */
+static int slots_check(const file_t *file, uint32_t new_size) {
+    if (!store_classify) {
+        return PICOKEYS_OK;
+    }
+    file_store_kind_t kind = store_classify(file->fid);
+    if (kind == FILE_STORE_FREE) {
+        return PICOKEYS_OK;
+    }
+    tally_t t;
+    tally(&t, file);
+    uint32_t old_size = file_get_size(file);
+    uint32_t before, after;
+    if (kind == FILE_STORE_OBJECT) {
+        before = t.object_slots + slots_for(old_size) + slots_for(t.part_bytes);
+        after = t.object_slots + slots_for(new_size) + slots_for(t.part_bytes);
+    }
+    else {
+        before = t.object_slots + slots_for(t.part_bytes + old_size);
+        after = t.object_slots + slots_for(t.part_bytes + new_size);
+    }
+    if (after > before && after > slots_total()) {
+        store_full = true;
+        return PICOKEYS_ERR_STORE_FULL;
+    }
+    return PICOKEYS_OK;
 }
 
 #endif

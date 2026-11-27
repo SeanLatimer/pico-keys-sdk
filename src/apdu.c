@@ -130,7 +130,11 @@ int process_apdu(void) {
         }
     }
     else if (current_app && current_app->process_apdu) {
+        file_store_take_full();
         result = current_app->process_apdu();
+        if (file_store_take_full() && result != 0x9000 && (result >> 8) != 0x61) {
+            result = SW_FILE_FULL();
+        }
     }
     else {
         result = SW_FILE_NOT_FOUND();

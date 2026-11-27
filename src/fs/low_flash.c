@@ -699,8 +699,19 @@ void low_flash_init(void) {
     data_end_addr += XIP_BASE;
 #else
     fd_map = open("memory.flash", O_RDWR | O_CREAT, (mode_t) 0600);
-    lseek(fd_map, FLASH_SIZE_BYTES - 1, SEEK_SET);
-    write(fd_map, "", 1);
+    /* A new or short file is filled out with 0xFF, as erased flash reads.
+       What a file already holds is left alone: the store uses the top of it. */
+    off_t have = lseek(fd_map, 0, SEEK_END);
+    if (have >= 0 && have < (off_t)FLASH_SIZE_BYTES) {
+        static uint8_t erased[4096];
+        memset(erased, 0xFF, sizeof(erased));
+        for (off_t at = have; at < (off_t)FLASH_SIZE_BYTES; at += (off_t)sizeof(erased)) {
+            size_t n = MIN(sizeof(erased), (size_t)((off_t)FLASH_SIZE_BYTES - at));
+            if (write(fd_map, erased, (unsigned)n) != (ssize_t)n) {
+                break;
+            }
+        }
+    }
     map = mmap(0, FLASH_SIZE_BYTES, PROT_READ | PROT_WRITE, MAP_SHARED, fd_map, 0);
     data_start_addr = 0;
     data_end_addr = FLASH_SIZE_BYTES;

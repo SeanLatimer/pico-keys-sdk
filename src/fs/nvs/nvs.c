@@ -1358,3 +1358,43 @@ int nvs_sector_use_next(struct nvs_fs *fs) {
     }
     return nvs_gc(fs, NULL);
 }
+
+uint32_t nvs_crc32(const void *buf, size_t len) {
+    return crc32_ieee(buf, len);
+}
+
+ssize_t nvs_peek(const struct nvs_flash *flash, uint32_t sector_size, uint16_t sector_count, uint16_t id, void *data, size_t len) {
+    struct nvs_ate ate;
+    const size_t ate_size = sizeof(struct nvs_ate);
+    uint32_t crc;
+
+    if (!flash || !flash->read || flash->write_block_size > 1 || sector_size > NVS_MAX_SECTOR_SIZE || sector_size < 4 * ate_size) {
+        return -EINVAL;
+    }
+    for (uint32_t s = 0; s < sector_count; s++) {
+        uint32_t base = s * sector_size;
+        /* the close ate is at the top; entries go down from below it */
+        for (uint32_t a = sector_size - 2 * ate_size; ; a -= ate_size) {
+            if (flash->read(flash->ctx, base + a, &ate, sizeof(ate))) {
+                return -EIO;
+            }
+            if (!nvs_ate_cmp_const(&ate, flash->erase_value)) {
+                break;
+            }
+            if (!nvs_ate_crc8_check(&ate) && ate.id == id && (uint32_t)ate.offset + ate.len <= a &&
+                ate.len >= NVS_DATA_CRC_SIZE && (size_t)(ate.len - NVS_DATA_CRC_SIZE) <= len) {
+                size_t n = ate.len - NVS_DATA_CRC_SIZE;
+                if (flash->read(flash->ctx, base + ate.offset, data, n) || flash->read(flash->ctx, base + ate.offset + n, &crc, sizeof(crc))) {
+                    return -EIO;
+                }
+                if (crc == crc32_ieee(data, n)) {
+                    return (ssize_t)n;
+                }
+            }
+            if (a < ate_size) {
+                break;
+            }
+        }
+    }
+    return -ENOENT;
+}

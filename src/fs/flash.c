@@ -303,6 +303,19 @@ uint32_t flash_num_files(void) {
     return num_files;
 }
 
+/* the old file system has no slot accounting */
+void file_store_set_classifier(file_store_kind_t (*classify)(uint16_t fid)) {
+    (void)classify;
+}
+
+void file_store_usage(file_store_usage_t *usage) {
+    memset(usage, 0, sizeof(*usage));
+}
+
+bool file_store_take_full(void) {
+    return false;
+}
+
 #endif
 
 uint32_t flash_size(void) {

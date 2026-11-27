@@ -80,6 +80,14 @@ int nvs_locate(struct nvs_fs *fs, uint16_t id, uint32_t *offset, size_t *len);
 typedef int (*nvs_foreach_cb)(void *ctx, uint16_t id, uint32_t offset, size_t len);
 int nvs_foreach(struct nvs_fs *fs, nvs_foreach_cb cb, void *ctx, uint8_t *work);
 
+/* Reads id without mounting or writing anything: the first valid copy found,
+ * not necessarily the newest. For a value written once, such as a format
+ * marker, in flash that may not hold a store at all. */
+ssize_t nvs_peek(const struct nvs_flash *flash, uint32_t sector_size, uint16_t sector_count, uint16_t id, void *data, size_t len);
+
+/* CRC-32 (IEEE), as the store uses for values. */
+uint32_t nvs_crc32(const void *buf, size_t len);
+
 /* Largest value one entry can hold. */
 #define NVS_MAX_VALUE(sector_size) ((sector_size) - 4 * 8 - 4)
 

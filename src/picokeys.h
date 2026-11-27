@@ -164,6 +164,7 @@ static inline uint32_t put_uint64_le(uint64_t n, uint8_t *b) {
 #define PICOKEYS_WRONG_PADDING                   -1011
 #define PICOKEYS_VERIFICATION_FAILED             -1012
 #define PICOKEYS_ERR_STALE_HANDLE                 -1013
+#define PICOKEYS_ERR_STORE_FULL                   -1014
 
 #define PICOKEYS_CHECK(x) do { ret = (x); if (ret != PICOKEYS_OK) goto err; } while (0)
 

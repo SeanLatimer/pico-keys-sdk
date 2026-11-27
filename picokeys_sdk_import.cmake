@@ -336,11 +336,33 @@ if(ENABLE_PQC)
     )
 endif()
 
-# Size of the file store's data area in 16 KB sectors (default 64, 1 MB).
-# Tests set it small so garbage collection runs often.
+# Largest data store, in 16 KB sectors (default: up to the top of the data
+# area). Tests set it small so garbage collection runs often.
 if(PICOKEYS_FILE_STORE_DATA_SECTORS)
     add_compile_definitions(FILE_STORE_DATA_SECTORS=${PICOKEYS_FILE_STORE_DATA_SECTORS}u)
 endif()
+
+# Slot cap on keys, certificates and data objects. Each object costs
+# ceil(size / SLOT_BYTES) slots; the cap is SLOTS_MAX or what fits in the data
+# store with HEADROOM_PERCENT left free, whichever is less. Policy, not format:
+# a build with a lower cap keeps what a device holds and refuses new objects.
+set(PICOKEYS_STORE_SLOTS_MAX 512 CACHE STRING "Most object slots")
+set(PICOKEYS_STORE_SLOT_BYTES 4096 CACHE STRING "Bytes per object slot")
+set(PICOKEYS_STORE_HEADROOM_PERCENT 30 CACHE STRING "Share of the data store kept free")
+if(PICOKEYS_STORE_HEADROOM_PERCENT LESS 10 OR PICOKEYS_STORE_HEADROOM_PERCENT GREATER 99)
+    message(FATAL_ERROR "PICOKEYS_STORE_HEADROOM_PERCENT must be between 10 and 99")
+endif()
+if(PICOKEYS_STORE_SLOT_BYTES LESS 1024)
+    message(FATAL_ERROR "PICOKEYS_STORE_SLOT_BYTES must be at least 1024")
+endif()
+if(PICOKEYS_STORE_SLOTS_MAX LESS 1)
+    message(FATAL_ERROR "PICOKEYS_STORE_SLOTS_MAX must be at least 1")
+endif()
+add_compile_definitions(
+    PICOKEYS_STORE_SLOTS_MAX=${PICOKEYS_STORE_SLOTS_MAX}u
+    PICOKEYS_STORE_SLOT_BYTES=${PICOKEYS_STORE_SLOT_BYTES}u
+    PICOKEYS_STORE_HEADROOM_PERCENT=${PICOKEYS_STORE_HEADROOM_PERCENT}u
+)
 
 if(ESP_PLATFORM)
     list(APPEND PICOKEYS_SOURCES

@@ -77,6 +77,28 @@
 #define FILE_STORE_RESERVED_FID 0xFFFCu
 #define FILE_STORE_FID_RESERVED(fid) (((fid) >= FILE_STORE_CHUNK_FIRST && (fid) <= FILE_STORE_CHUNK_LAST) || (fid) >= FILE_STORE_RESERVED_FID)
 
+/* What the store charges a file against the slot cap. Objects (keys,
+   certificates, data objects) cost ceil(size / slot bytes) each; parts of
+   objects kept in other files are pooled and charged together. */
+typedef enum {
+    FILE_STORE_FREE = 0,
+    FILE_STORE_OBJECT,
+    FILE_STORE_PART
+} file_store_kind_t;
+
+typedef struct {
+    uint32_t slots_used;
+    uint32_t slots_total;
+    uint32_t slot_bytes;
+    uint32_t objects;
+} file_store_usage_t;
+
+/* Set by the application at start-up; without one nothing is charged. */
+extern void file_store_set_classifier(file_store_kind_t (*classify)(uint16_t fid));
+extern void file_store_usage(file_store_usage_t *usage);
+/* True once if a write was refused because the slots are used up. */
+extern bool file_store_take_full(void);
+
 #ifdef _MSC_VER
 __pragma( pack(push, 1) )
 #endif

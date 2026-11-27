@@ -341,11 +341,71 @@ static void test_api(void) {
     size_t len;
     assert(nvs_locate(&fs, 5, &off, &len) == 0 && len == 3 && !memcmp(flash + off, b, 3));
     assert(nvs_locate(&fs, 9, &off, &len) == -ENOENT);
+
+    /* peek reads without a mount, and finds nothing in blank or random flash */
+    assert(nvs_peek(&sim, sector_size, (uint16_t)sector_count, 4, out, sizeof(out)) == 3 && !memcmp(out, a, 3));
+    assert(nvs_peek(&sim, sector_size, (uint16_t)sector_count, 9, out, sizeof(out)) == -ENOENT);
+    fresh_flash();
+    assert(nvs_peek(&sim, sector_size, (uint16_t)sector_count, 4, out, sizeof(out)) == -ENOENT);
+    rng_state = 99;
+    for (size_t i = 0; i < sector_size * sector_count; i++) {
+        flash[i] = (uint8_t)rnd();
+    }
+    assert(nvs_peek(&sim, sector_size, (uint16_t)sector_count, 4, out, sizeof(out)) == -ENOENT);
     printf("api checks: ok\n");
+}
+
+static void apply(model_t *m, const op_t *o) {
+    for (int j = 0; j < o->n; j++) {
+        uint16_t id = o->id[j];
+        m->present[id] = o->len[j] > 0;
+        m->len[id] = o->len[j];
+        make_value(m->val[id], o->len[j], o->fill[j], o->id[j]);
+    }
+}
+
+/* A store that has never wrapped (values from sector 0 to the write sector,
+ * blank after it) mounts with more sectors and keeps working, as the file
+ * store relies on when it grows into the space an earlier layout used. */
+static void test_grow(void) {
+    sector_size = 4096;
+    sector_count = 5;
+    gen_ops(7, 300);
+    fresh_flash();
+    cut_at = -1;
+    mount();
+    model_t m;
+    memset(&m, 0, sizeof(m));
+    int i = 0;
+    for (; i < OPS && (fs.ate_wra >> 16) < 2; i++) {
+        assert(run_op(&ops[i]) == 0);
+        apply(&m, &ops[i]);
+    }
+    uint32_t k = fs.ate_wra >> 16;
+    assert(k == 2 && k + 3 <= sector_count);
+    for (size_t b = (k + 1) * sector_size; b < MAX_SECTORS * sector_size; b++) {
+        assert(flash[b] == 0xFF);
+    }
+    sector_count = MAX_SECTORS;
+    mount();
+    model_check(&m, "after growing");
+    /* the rest of the script, then all of it twice more, so gc wraps the grown store */
+    for (int round = 0; round < 3; round++) {
+        for (; i < OPS; i++) {
+            assert(run_op(&ops[i]) == 0);
+            apply(&m, &ops[i]);
+        }
+        model_check(&m, "grown store");
+        mount();
+        model_check(&m, "grown store after remount");
+        i = 0;
+    }
+    printf("growing a store from 5 to %u sectors: ok\n", MAX_SECTORS);
 }
 
 int main(void) {
     test_api();
+    test_grow();
     power_cut_sweep(1, 4096, 3, 300, 1);
     power_cut_sweep(2, 4096, 4, 600, 1);
     power_cut_sweep(3, 8192, 3, 900, 1);

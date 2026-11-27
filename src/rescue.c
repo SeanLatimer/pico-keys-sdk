@@ -406,7 +406,15 @@ static int cmd_read(void) {
     }
     else if (p1 == 0x2) { // FLASH INFO
         res_APDU_size = 0;
+#if defined(PICOKEYS_LEGACY_FS) || defined(ENABLE_DIAGNOSTICS)
         uint32_t free = flash_free_space(), total = flash_total_space(), used = flash_used_space(), nfiles = flash_num_files();
+#else
+        /* the slots, in bytes, and the objects: what the device can still hold */
+        file_store_usage_t usage;
+        file_store_usage(&usage);
+        uint32_t total = usage.slots_total * usage.slot_bytes, used = usage.slots_used * usage.slot_bytes;
+        uint32_t free = used < total ? total - used : 0, nfiles = usage.objects;
+#endif
         uint32_t size;
 #ifdef ESP_PLATFORM
         size = 0;
@@ -450,6 +458,15 @@ static int cmd_read(void) {
         res_APDU[res_APDU_size++] = enabled ? 0x1 : 0x0;
         res_APDU[res_APDU_size++] = locked ? 0x1 : 0x0;
         res_APDU[res_APDU_size++] = bootkey;
+    }
+    else if (p1 == 0x6) { // STORE SLOTS
+        file_store_usage_t usage;
+        file_store_usage(&usage);
+        res_APDU_size = 0;
+        res_APDU_size += put_uint32_be(usage.slots_used, res_APDU + res_APDU_size);
+        res_APDU_size += put_uint32_be(usage.slots_total, res_APDU + res_APDU_size);
+        res_APDU_size += put_uint32_be(usage.slot_bytes, res_APDU + res_APDU_size);
+        res_APDU_size += put_uint32_be(usage.objects, res_APDU + res_APDU_size);
     }
 #ifndef ENABLE_EMULATION
     else if (p1 == 0x7) { // BUTTON POLLS
