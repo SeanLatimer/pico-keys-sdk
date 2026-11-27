@@ -451,6 +451,13 @@ static int cmd_read(void) {
         res_APDU[res_APDU_size++] = locked ? 0x1 : 0x0;
         res_APDU[res_APDU_size++] = bootkey;
     }
+#ifndef ENABLE_EMULATION
+    else if (p1 == 0x7) { // BUTTON POLLS
+        res_APDU_size = 0;
+        res_APDU_size += put_uint32_be(button_polls, res_APDU + res_APDU_size);
+        res_APDU_size += put_uint32_be(button_lockout_failures, res_APDU + res_APDU_size);
+    }
+#endif
     else if (p1 == 0x4) { // GET TIME
         if (p2 != 0x1 && p2 != 0x2) {
             return SW_INCORRECT_P1P2();

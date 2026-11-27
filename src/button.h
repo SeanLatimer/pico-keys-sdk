@@ -35,6 +35,7 @@ typedef enum {
 extern void button_wait_start(void);
 extern void button_wait_poll(void);
 extern volatile uint32_t button_pressed_duration;
+extern uint32_t button_polls, button_lockout_failures;
 extern void button_task(void);
 extern volatile bool cancel_button;
 extern bool touch_accept_button;

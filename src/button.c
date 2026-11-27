@@ -107,6 +107,8 @@ static bool button_hold_state = false;
 static uint32_t button_hold_started = 0;
 static uint32_t button_last_poll = 0;
 volatile uint32_t button_pressed_duration = 0;
+/* readings taken, and polls that could not park core 1 to take one */
+uint32_t button_polls = 0, button_lockout_failures = 0;
 
 void button_wait_start(void) {
     button_wait_start_timeout(button_timeout_seconds());
@@ -129,7 +131,9 @@ void button_wait_start_timeout(uint32_t timeout_seconds) {
     signal_emit_param(SIGNAL_USER_PRESENCE_REQUEST, &data);
     cancel_button = false;
     async_button_wait = true;
-    async_button_pressed = picok_board_button_read();
+    /* The last reading button_task took with core 1 parked: reading the
+       BOOTSEL button takes the flash away, so it is never read here. */
+    async_button_pressed = button_hold_state;
     async_button_started = board_millis();
     async_button_timeout = button_timeout;
     async_button_led_mode = led_get_mode();
@@ -137,11 +141,13 @@ void button_wait_start_timeout(uint32_t timeout_seconds) {
     led_set_mode(MODE_BUTTON);
 }
 
-void button_wait_poll(void) {
+/* `pressed` is the reading button_task just took with core 1 parked, or
+   the previous one when it could not park core 1: the timeout and a cancel
+   must still end the wait. */
+static void button_wait_poll_with(bool pressed) {
     if (!async_button_wait) {
         return;
     }
-    bool pressed = picok_board_button_read();
     uint32_t now = board_millis();
     if (!async_button_pressed && pressed) {
         async_button_pressed = true;
@@ -184,6 +190,10 @@ void button_wait_poll(void) {
     }
 }
 
+void button_wait_poll(void) {
+    button_wait_poll_with(button_hold_state);
+}
+
 #endif
 
 uint32_t button_timeout_seconds(void) {
@@ -212,6 +222,10 @@ void button_task(void) {
     if (now > 1000 && now - button_last_poll >= 10 && (async_button_wait || !is_busy())) { // wait 1 second to boot up
 #ifdef PICO_PLATFORM
         if (!multicore_lockout_start_timeout_us(1000)) {
+            button_lockout_failures++;
+            button_last_poll = now;
+            /* no reading this time, but a wait must still time out */
+            button_wait_poll_with(button_hold_state);
             return;
         }
 #endif
@@ -219,9 +233,11 @@ void button_task(void) {
 #ifdef PICO_PLATFORM
         multicore_lockout_end_timeout_us(1000);
 #endif
+        button_polls++;
         button_last_poll = now;
         if (async_button_wait) {
-            button_wait_poll();
+            button_hold_state = current_button_state;
+            button_wait_poll_with(current_button_state);
             return;
         }
         if (current_button_state && !button_hold_state) {
